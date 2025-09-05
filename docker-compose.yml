@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  onvif-vms:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+      - "3702:3702/udp"  # ONVIF Discovery
+      - "8554:8554"      # RTSP Proxy
+    volumes:
+      - ./local:/app/local
+      - ./recordings:/app/recordings
+      - ./logs:/app/logs
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - CLIENT_PORT=3000
+      - DB_PATH=./local/database.db
+      - ONVIF_DISCOVERY_PORT=3702
+      - RECORDINGS_PATH=./local/recordings
+      - LOG_LEVEL=info
+    networks:
+      - onvif-network
+    restart: unless-stopped
+    depends_on:
+      - redis
+    hostname: onvif-vms
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - onvif-network
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./ssl:/etc/nginx/ssl
+    depends_on:
+      - onvif-vms
+    networks:
+      - onvif-network
+    restart: unless-stopped
+
+networks:
+  onvif-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  redis_data:

@@ -1,0 +1,42 @@
+{
+  "name": "onvif-vms-server",
+  "version": "1.0.0",
+  "description": "ONVIF Video Management Server with device discovery and streaming",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon --ext js --watch . --ignore node_modules --ignore ../node_modules --exec \"node index.js\"",
+    "install-deps": "node install-deps.js"
+  },
+  "keywords": [
+    "onvif",
+    "video",
+    "management",
+    "streaming",
+    "camera",
+    "discovery"
+  ],
+  "author": "ONVIF VMS Team",
+  "license": "MIT",
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.0",
+    "mysql2": "^3.14.3",
+    "node-fetch": "^2.7.0",
+    "ping": "^0.4.4",
+    "socket.io": "^4.7.2",
+    "sqlite3": "^5.1.6",
+    "uuid": "^9.0.1",
+    "xml2js": "^0.6.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
