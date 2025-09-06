@@ -1,0 +1,31 @@
+# Logs
+logs/
+local/logs/
+*.log
+
+# Node / frontend
+node_modules/
+dist/
+build/
+.vite/
+.next/
+
+# Env & misc
+.env
+*.env
+.DS_Store
+# Logs
+local/logs/
+*.log
+
+# Node / build
+node_modules/
+dist/
+build/
+.vite/
+.next/
+
+# Env & misc
+.env
+*.env
+.DS_Store
