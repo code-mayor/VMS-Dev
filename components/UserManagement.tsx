@@ -39,6 +39,22 @@ interface User {
   locked_until?: string
 }
 
+// Tries all places the token might be stored and returns a string or null
+function getToken(): string | null {
+  const direct = localStorage.getItem('vms_token');
+  if (direct) return direct;
+
+  const access = localStorage.getItem('accessToken');
+  if (access) return access;
+
+  try {
+    const blob = JSON.parse(localStorage.getItem('auth') || '{}');
+    if (blob?.accessToken) return blob.accessToken;
+  } catch { }
+  return null;
+}
+
+
 interface UserManagementProps {
   currentUser: any
   hasPermission: (resource: string, action: string) => boolean
@@ -65,25 +81,34 @@ export function UserManagement({ currentUser, hasPermission, onTokenExpired }: U
   })
 
   useEffect(() => {
-    const token = localStorage.getItem('vms_token')
-    const mode = localStorage.getItem('vms_session_mode') || 'online'
-    const isDemo = mode === 'demo' || (token || '').startsWith('demo_token_')
-
-    if (!token) {
-      setError('Please log in to view users')
-      setLoading(false)
-      return
-    }
+    const token = getToken();
+    const mode = localStorage.getItem('vms_session_mode') || 'online';
+    const isDemo = mode === 'demo' || (token || '').startsWith('demo_token_');
 
     if (isDemo) {
-      setError('Demo mode: User Management requires a server login.')
-      setLoading(false)
-      return
+      setError('Demo mode: User Management requires a server login.');
+      setLoading(false);
+      return;
     }
 
-    loadUsers()
-  }, [])
+    if (!token) {
+      // Show the banner but try once shortly (in case token is written just after mount)
+      setError('Please log in to view users');
+      setLoading(false);
+      const t = setTimeout(() => {
+        const tkn = getToken();
+        if (tkn) {
+          setError('');
+          setLoading(true);
+          loadUsers();
+        }
+      }, 600);
+      return () => clearTimeout(t);
+    }
 
+    // We have a token → load
+    loadUsers();
+  }, []);
 
   const checkAndRefreshToken = async () => {
     try {
@@ -366,13 +391,18 @@ export function UserManagement({ currentUser, hasPermission, onTokenExpired }: U
         return
       }
 
-      const response = await fetch(`http://localhost:3001/api/auth/users/${userId}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ active })
+      // const response = await fetch(`http://localhost:3001/api/auth/users/${userId}`, {
+      //   method: 'PUT',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'Authorization': `Bearer ${token}`
+      //   },
+      //   body: JSON.stringify({ active })
+      // })
+
+      const response = await authFetch('http://localhost:3001/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify(formData)
       })
 
       if (response.status === 401) {

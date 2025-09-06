@@ -732,6 +732,24 @@ router.get('/status', async (req, res) => {
         }
       }
 
+      const nowIso = toSqlDateTime();
+
+      res.json({
+        success: true,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          permissions: permissions,
+          session_timeout: 3600,
+          last_activity: nowIso,
+          created_at: user.created_at,
+          last_login: user.last_login
+        }
+      });
+
+
       res.json({
         success: true,
         user: {

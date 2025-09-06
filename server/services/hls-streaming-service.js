@@ -264,9 +264,9 @@ class HLSStreamingService {
       '-map', '0:a:0?',
       // HLS output
       '-f', 'hls',
-      '-hls_time', '2',
-      '-hls_list_size', '3',
-      '-hls_flags', 'delete_segments+append_list',
+      '-hls_time', '4',
+      '-hls_list_size', '10',
+      '-hls_flags', 'delete_segments+program_date_time+second_level_segment_index',
       '-hls_segment_filename', segmentPattern,
       '-hls_segment_type', 'mpegts',
       '-start_number', '0',

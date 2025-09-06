@@ -182,6 +182,9 @@ export function LoginForm({ onLogin }: LoginFormProps) {
       console.log(`🔐 Attempting login for: ${loginData.email}`)
 
       const { user, accessToken } = await authService.signIn(loginData.email, loginData.password)
+      // Always save under the canonical key that the app reads
+      localStorage.setItem('vms_token', accessToken);
+
       const isDemo = accessToken.startsWith('demo_token_');
       localStorage.setItem('vms_session_mode', isDemo ? 'demo' : 'online');
 
@@ -276,6 +279,8 @@ export function LoginForm({ onLogin }: LoginFormProps) {
       setLoginData({ email: demoUser.email, password: demoUser.password })
 
       const { user, accessToken } = await authService.signIn(demoUser.email, demoUser.password)
+      localStorage.setItem('vms_token', accessToken);
+
       const isDemo = accessToken.startsWith('demo_token_');
       localStorage.setItem('vms_session_mode', isDemo ? 'demo' : 'online');
 
