@@ -3,6 +3,7 @@ const router = express.Router();
 const { logger } = require('../utils/logger');
 const fs = require('fs');
 const path = require('path');
+const net = require('net');
 
 // Get database connection from app
 const getDbConnection = (req) => req.app.get('dbConnection');
@@ -127,6 +128,188 @@ router.get('/', async (req, res) => {
       version: errorHealth.version,
       response_time: errorHealth.response_time,
       health: errorHealth
+    });
+  }
+});
+
+/**
+ * Helper function to check TCP port connectivity
+ */
+async function checkTcpPort(host, port, timeout = 2000) {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let connected = false;
+    let startTime = Date.now();
+
+    socket.setTimeout(timeout);
+
+    socket.on('connect', () => {
+      connected = true;
+      const latency = Date.now() - startTime;
+      socket.destroy();
+      resolve({ success: true, latency });
+    });
+
+    socket.on('timeout', () => {
+      socket.destroy();
+      resolve({ success: false, error: 'timeout' });
+    });
+
+    socket.on('error', (err) => {
+      resolve({ success: false, error: err.message });
+    });
+
+    socket.connect(port, host);
+  });
+}
+
+/**
+ * GET /api/health/devices/test - Test endpoint to debug device IDs
+ */
+router.get('/devices/test', async (req, res) => {
+  try {
+    const dbConnection = getDbConnection(req);
+
+    const devices = await dbConnection.all('SELECT id, name, ip_address, authenticated FROM devices WHERE authenticated = 1');
+
+    logger.info(`Test: Found ${devices.length} authenticated devices`);
+    devices.forEach(device => {
+      logger.info(`Test Device: id="${device.id}", name="${device.name}", ip="${device.ip_address}"`);
+    });
+
+    res.json({
+      success: true,
+      raw_devices: devices,
+      count: devices.length
+    });
+  } catch (error) {
+    logger.error('Test endpoint error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/health/devices - Cross-platform device connectivity check
+ * Uses TCP port checking instead of ping for better reliability
+ */
+router.get('/devices', async (req, res) => {
+  try {
+    const dbConnection = getDbConnection(req);
+
+    // Get only authenticated devices
+    let devices = [];
+    try {
+      devices = await dbConnection.all('SELECT * FROM devices WHERE authenticated = 1');
+    } catch (err) {
+      logger.error('Failed to fetch devices:', err);
+      devices = [];
+    }
+
+    const deviceHealth = [];
+
+    for (const device of devices) {
+      const status = {
+        id: device.id,
+        name: device.name,
+        ip: device.ip_address,
+        authenticated: Boolean(device.authenticated),
+        network: 'unknown',
+        rtsp: 'unknown',
+        lastSeen: device.last_seen,
+        health: 'unknown',
+        latency: null
+      };
+
+      try {
+        // First check HTTP port (80) or the device's specified port
+        const httpPort = device.port || 80;
+        logger.debug(`Checking connectivity for ${device.name} at ${device.ip_address}:${httpPort}`);
+
+        const httpCheck = await checkTcpPort(device.ip_address, httpPort, 3000);
+
+        if (httpCheck.success) {
+          status.network = 'reachable';
+          status.latency = httpCheck.latency;
+
+          // If HTTP is reachable, also check RTSP port
+          logger.debug(`Checking RTSP port 554 for ${device.name}`);
+          const rtspCheck = await checkTcpPort(device.ip_address, 554, 2000);
+          status.rtsp = rtspCheck.success ? 'open' : 'closed';
+        } else {
+          // If HTTP port is not reachable, try ONVIF port 8080 as fallback
+          logger.debug(`HTTP port failed, trying ONVIF port 8080 for ${device.name}`);
+          const onvifCheck = await checkTcpPort(device.ip_address, 8080, 3000);
+
+          if (onvifCheck.success) {
+            status.network = 'reachable';
+            status.latency = onvifCheck.latency;
+
+            // Check RTSP port
+            const rtspCheck = await checkTcpPort(device.ip_address, 554, 2000);
+            status.rtsp = rtspCheck.success ? 'open' : 'closed';
+          } else {
+            // Last resort - just check RTSP port directly
+            logger.debug(`Checking only RTSP port for ${device.name}`);
+            const rtspCheck = await checkTcpPort(device.ip_address, 554, 3000);
+
+            if (rtspCheck.success) {
+              status.network = 'reachable';
+              status.rtsp = 'open';
+              status.latency = rtspCheck.latency;
+            } else {
+              status.network = 'unreachable';
+              status.rtsp = 'unknown';
+            }
+          }
+        }
+
+      } catch (error) {
+        // Network check failed completely
+        status.network = 'unreachable';
+        logger.debug(`Network check failed for ${device.ip_address}: ${error.message}`);
+      }
+
+      // Determine overall health based on connectivity
+      if (status.network === 'reachable') {
+        if (status.rtsp === 'open') {
+          status.health = 'healthy';
+        } else {
+          // Device is reachable but RTSP is not working
+          status.health = 'degraded';
+        }
+      } else {
+        status.health = 'offline';
+      }
+
+      logger.debug(`Device ${device.name} health: ${status.health} (network: ${status.network}, rtsp: ${status.rtsp})`);
+      deviceHealth.push(status);
+    }
+
+    const summary = {
+      total: deviceHealth.length,
+      healthy: deviceHealth.filter(d => d.health === 'healthy').length,
+      degraded: deviceHealth.filter(d => d.health === 'degraded').length,
+      offline: deviceHealth.filter(d => d.health === 'offline').length
+    };
+
+    logger.info(`Device health check complete: ${summary.healthy} healthy, ${summary.degraded} degraded, ${summary.offline} offline`);
+
+    res.json({
+      success: true,
+      summary,
+      devices: deviceHealth,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    logger.error('Device health check error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Device health check failed',
+      message: error.message
     });
   }
 });

@@ -184,6 +184,8 @@ router.post('/discover', async (req, res) => {
     // Save discovered devices to database
     const savedDevices = [];
 
+    logger.info(`🔍 Discovered devices with statuses: ${discoveredDevices.map(d => `${d.ip_address}:${d.status}`).join(', ')}`);
+
     for (const device of discoveredDevices) {
       try {
         // Check if device already exists
@@ -196,16 +198,19 @@ router.post('/discover', async (req, res) => {
           // Update existing device
           const updateQuery = `
             UPDATE devices 
-            SET last_seen = ?, discovery_method = ?, network_interface = ?, 
-                capabilities = ?, updated_at = CURRENT_TIMESTAMP
+            SET last_seen = ?, discovery_method = ?, network_interface = ?,
+            capabilities = ?, status = ?, updated_at = CURRENT_TIMESTAMP
             WHERE ip_address = ?
           `;
+
+          logger.info(`📊 Updating device ${device.ip_address}: status="${device.status}", last_seen="${device.last_seen}"`);
 
           await dbAdapter.run(updateQuery, [
             device.last_seen,
             device.discovery_method,
             device.network_interface,
             stringifyForDb(device.capabilities, dbType),
+            device.status,
             device.ip_address
           ]);
 
@@ -583,6 +588,11 @@ router.post('/:id/authenticate', async (req, res) => {
 
         streamingResult = await hlsService.startStreamingWithRetry(updatedDevice, 3, 2000);
         logger.info(`✅ HLS streaming started for ${device.name}: ${streamingResult.url}`);
+
+        // Auto-start streaming for this device using stream manager
+        const streamManager = require('../services/stream-manager');
+        await streamManager.startStreamForDevice(updatedDevice);
+        logger.info(`✅ Stream manager auto-start initiated for ${device.name}`);
 
       } catch (streamError) {
         logger.error(`❌ Failed to start HLS streaming for ${device.name}: ${streamError.message}`);

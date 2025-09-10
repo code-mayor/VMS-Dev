@@ -187,46 +187,44 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
       return
     }
 
+    // Ensure consistent stream ID format
     const ipForStream = device.ip_address.replace(/\./g, '-')
-    const streamId = `onvif-${ipForStream}_hls`
+    const deviceIdForStream = device.id.replace(/\./g, '-')
+    const streamId = `${deviceIdForStream}_hls`
     const hlsUrl = `http://localhost:3001/hls/${streamId}/playlist.m3u8`
 
-    // Check if stream is already running on backend
     try {
-      const checkResponse = await fetch(hlsUrl, { method: 'HEAD' })
-      if (checkResponse.ok) {
-        console.log(`Stream already running on backend for ${device.name}`)
-        // Stream exists, just update state
-        setStreamState(device.id, {
-          deviceId: device.id,
-          url: hlsUrl,
-          status: 'connected',
-          audioEnabled: false,
-          recording: false
-        })
-        return
+      // Start stream on backend first
+      const response = await fetch(`http://localhost:3001/api/streams/${device.id}/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ quality: 'auto', profile: 'auto' })
+      })
+
+      if (!response.ok) {
+        throw new Error(`Backend failed: ${await response.text()}`)
       }
+
+      // Update state only after backend confirms
+      setStreamState(device.id, {
+        deviceId: device.id,
+        url: hlsUrl,
+        status: 'connected',
+        audioEnabled: false,
+        recording: false
+      })
+
     } catch (err) {
-      // Stream doesn't exist yet, continue with starting it
+      console.error(`Failed to start stream for ${device.name}:`, err)
+      setStreamState(device.id, {
+        deviceId: device.id,
+        url: '',
+        status: 'error',
+        audioEnabled: false,
+        recording: false,
+        error: err.message
+      })
     }
-
-    // Set state and start stream as before...
-    setStreamState(device.id, {
-      deviceId: device.id,
-      url: hlsUrl,
-      status: 'connected',
-      audioEnabled: false,
-      recording: false
-    })
-
-    // Fire backend start request...
-    fetch(`http://localhost:3001/api/streams/${device.id}/start`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ quality: 'auto', profile: 'auto' })
-    }).catch(err => {
-      console.log(`Backend request for ${device.name}:`, err)
-    })
   }
 
   const stopStream = async (deviceId: string) => {
@@ -789,11 +787,29 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
                 const visibleDevices = authenticatedDevices.slice(0, getGridSize())
 
                 for (const device of visibleDevices) {
-                  const state = streamStates.get(device.id)
-                  if (!state || state.status === 'stopped' || state.status === 'error') {
-                    await startStream(device)
-                    // Critical: Add delay between starts to allow FFmpeg initialization
-                    await new Promise(resolve => setTimeout(resolve, 2500))
+                  try {
+                    // First, actually start the stream on the backend
+                    const response = await fetch(`http://localhost:3001/api/streams/${device.id}/start`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ quality: 'auto', profile: 'auto' })
+                    })
+
+                    if (!response.ok) {
+                      console.error(`Failed to start stream for ${device.name}:`, await response.text())
+                      continue
+                    }
+
+                    // Wait for backend to initialize
+                    await new Promise(resolve => setTimeout(resolve, 2000))
+
+                    // Then update frontend state
+                    const state = streamStates.get(device.id)
+                    if (!state || state.status === 'stopped' || state.status === 'error') {
+                      await startStream(device)
+                    }
+                  } catch (error) {
+                    console.error(`Failed to start ${device.name}:`, error)
                   }
                 }
                 setIsLoading(false)

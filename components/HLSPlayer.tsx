@@ -51,7 +51,12 @@ export function HLSPlayer({
   showRecordingControls = false
 }: HLSPlayerProps) {
 
-  console.log(`[HLSPlayer] Attempting to play: ${src} for device: ${deviceName}`)
+  const hasLoggedRef = useRef(false);
+
+  if (!hasLoggedRef.current) {
+    console.log(`[HLSPlayer] Attempting to play: ${src} for device: ${deviceName}`);
+    hasLoggedRef.current = true;
+  }
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
@@ -284,19 +289,29 @@ export function HLSPlayer({
         })
 
         hls.on('hlsError', (event: any, data: any) => {
-          console.log('HLS Error:', data.details, 'Fatal:', data.fatal)
+          // Only log the first few attempts to reduce console spam
+          if (manifestRetries < 3) {
+            console.log('HLS Error:', data.details, 'Fatal:', data.fatal)
+          }
 
           // For manifest errors, keep retrying silently for 15 seconds
           if (data.details === 'manifestLoadError' || data.details === 'levelLoadError') {
-            if (!manifestLoaded && manifestRetries < 15) { // 15 retries = ~15 seconds
+            if (!manifestLoaded && manifestRetries < 15) {
               manifestRetries++
-              console.log(`Manifest retry ${manifestRetries}/15`)
+
+              // Only log progress occasionally
+              if (manifestRetries % 5 === 0) {
+                console.log(`Waiting for stream... ${manifestRetries}/15`)
+              }
+
+              // Exponential backoff to reduce request spam
+              const retryDelay = Math.min(1000 * Math.pow(1.5, manifestRetries), 5000)
 
               setTimeout(() => {
                 if (hlsRef.current && !manifestLoaded) {
                   hlsRef.current.loadSource(src)
                 }
-              }, 1000)
+              }, retryDelay)
 
               // Don't show error until we've tried for 15 seconds
               if (manifestRetries < 15) {
@@ -308,14 +323,18 @@ export function HLSPlayer({
           if (data.fatal) {
             switch (data.type) {
               case 'networkError':
-                console.log('Network error, retrying...')
+                // Only log once
+                if (!firstFragLoaded && manifestRetries < 3) {
+                  console.log('Network error, retrying...')
+                }
                 if (!firstFragLoaded) {
-                  // Keep retrying silently
+                  // Exponential backoff here too
+                  const retryDelay = Math.min(2000 * Math.pow(1.5, manifestRetries), 8000)
                   setTimeout(() => {
                     if (hlsRef.current) {
                       hlsRef.current.loadSource(src)
                     }
-                  }, 2000)
+                  }, retryDelay)
                 } else {
                   hls.startLoad()
                 }
@@ -339,18 +358,41 @@ export function HLSPlayer({
         // Load source
         hls.loadSource(src)
 
-        // Start checking for manifest availability
+        // Start checking for manifest availability with exponential backoff
+        let checkCount = 0
         const checkInterval = setInterval(() => {
           if (manifestLoaded || manifestRetries >= 30) {
             clearInterval(checkInterval)
             return
           }
 
+          checkCount++
           manifestRetries++
-          console.log(`Checking for stream availability... ${manifestRetries}/30`)
+
+          // Only log every 5th check to reduce spam
+          if (checkCount % 5 === 0) {
+            console.log(`Checking for stream availability... ${manifestRetries}/30`)
+          }
 
           if (hlsRef.current) {
             hlsRef.current.loadSource(src)
+          }
+
+          // Increase interval after first few attempts
+          if (checkCount === 5) {
+            clearInterval(checkInterval)
+            // Switch to slower checking after initial attempts
+            const slowInterval = setInterval(() => {
+              if (manifestLoaded || manifestRetries >= 30) {
+                clearInterval(slowInterval)
+                return
+              }
+
+              manifestRetries++
+              if (hlsRef.current) {
+                hlsRef.current.loadSource(src)
+              }
+            }, 3000) // Check every 3 seconds instead of every second
           }
         }, 1000)
 

@@ -165,20 +165,24 @@ router.post('/stop-hls', async (req, res) => {
 router.post('/:deviceId/start', async (req, res) => {
   try {
     const { deviceId } = req.params;
+    const { quality, profile } = req.body;
 
-    // Get database connection - supports both MySQL and SQLite
-    // Get database adapter for unified database access
+    // Get database connection
+    const db = req.app.get('db');
     const dbAdapter = req.app.get('dbAdapter');
 
-    if (!dbAdapter) {
-      return res.status(500).json({
-        success: false,
-        error: 'Database connection not available'
+    // Get device from database
+    let device;
+    if (dbAdapter) {
+      device = await dbAdapter.get('SELECT * FROM devices WHERE id = ?', [deviceId]);
+    } else {
+      device = await new Promise((resolve, reject) => {
+        db.get('SELECT * FROM devices WHERE id = ?', [deviceId], (err, row) => {
+          if (err) reject(err);
+          else resolve(row);
+        });
       });
     }
-
-    // Query device from database using unified adapter method
-    const device = await dbAdapter.get('SELECT * FROM devices WHERE id = ?', [deviceId]);
 
     if (!device) {
       return res.status(404).json({
@@ -187,28 +191,37 @@ router.post('/:deviceId/start', async (req, res) => {
       });
     }
 
+    // Check if device has RTSP credentials
     if (!device.rtsp_username || !device.rtsp_password) {
       return res.status(400).json({
         success: false,
-        error: 'Device not authenticated - RTSP credentials required for streaming'
+        error: 'Device not authenticated - missing RTSP credentials'
       });
     }
 
+    // Start the stream using HLS service
+    const { HLSStreamingService } = require('../services/hls-streaming-service');
+    const hlsService = new HLSStreamingService();
+
     const result = await hlsService.startStreaming(device);
 
-    logger.info(`✅ Started streaming for device ${device.name}: ${result.streamId}`);
-
-    const response = {
-      ...result,
-      streamId: result.streamId || `${device.id}_hls`,
-      streamUrl: result.url || `/hls/${device.id}_hls/playlist.m3u8`,
-      playlistUrl: result.playlistUrl || result.url || `/hls/${device.id}_hls/playlist.m3u8`
-    };
-
-    res.json(response);
+    if (result.success) {
+      res.json({
+        success: true,
+        streamId: result.streamId,
+        url: result.url,
+        message: 'Stream started successfully'
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        error: 'Failed to start stream',
+        details: result.error || result.message
+      });
+    }
 
   } catch (error) {
-    logger.error(`❌ Failed to start streaming for device ${req.params.deviceId}:`, error);
+    console.error('Stream start error:', error);
     res.status(500).json({
       success: false,
       error: 'Failed to start streaming',
@@ -549,16 +562,21 @@ router.post('/test-ffmpeg', async (req, res) => {
 
     // Simple FFmpeg command that matches user's working test
     const ffmpegArgs = [
+      '-y',
       '-rtsp_transport', 'tcp',
       '-i', rtspUrl,
       '-c:v', 'copy',
-      '-an', // No audio to avoid codec issues
+      '-c:a', 'copy',  // Changed from AAC transcoding to copy
       '-f', 'hls',
-      '-hls_time', '10',
-      '-hls_list_size', '3',
-      '-hls_segment_filename', segmentPath,
-      '-t', duration.toString(), // Limit duration for test
-      playlistPath
+      '-hls_time', '2',
+      '-hls_list_size', '6',
+      '-hls_flags', 'delete_segments+independent_segments',
+      '-hls_segment_filename', path.join(outputDir, 'segment%03d.ts'),
+      '-hls_segment_type', 'mpegts',
+      '-hls_allow_cache', '0',
+      '-max_muxing_queue_size', '1024',  // Added to prevent buffer overflow
+      '-vsync', '0',  // Added to handle timestamp issues
+      path.join(outputDir, 'playlist.m3u8')
     ];
 
     console.log(`🔧 FFmpeg test command: ffmpeg ${ffmpegArgs.join(' ').replace(rtspUrl, maskedUrl)}`);

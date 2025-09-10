@@ -7,12 +7,12 @@ import { Switch } from './ui/switch'
 import { Input } from './ui/input'
 import { Label } from './ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
-import { 
-  Clock, 
-  HardDrive, 
-  Settings, 
-  AlertTriangle, 
-  CheckCircle, 
+import {
+  Clock,
+  HardDrive,
+  Settings,
+  AlertTriangle,
+  CheckCircle,
   RefreshCw,
   Save,
   Camera,
@@ -37,13 +37,13 @@ interface AutoRecordingSettingsProps {
 }
 
 export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordingSettingsProps) {
-  // Auto-recording settings state (optimized for 4-second chunks as requested)
+  // Auto-recording settings state (optimized for 1-minute chunks)
   const [settings, setSettings] = useState<RecordingSettings>({
     enabled: false,
-    chunkDuration: 4, // minutes - increased to 4 minutes for better file sizes
+    chunkDuration: 1, // minutes - 1 minute for testing
     quality: 'medium',
-    maxStorage: 100, // GB
-    retentionPeriod: 30, // days
+    maxStorage: 30, // GB
+    retentionPeriod: 1, // days
     enabledDevices: []
   })
 
@@ -61,184 +61,158 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
     storageUsed: '0 MB'
   })
 
+  const [saveTimeout, setSaveTimeout] = useState<NodeJS.Timeout | null>(null)
+
+  // Initial load only
   useEffect(() => {
     loadSettings()
     loadStatistics()
-    
-    // Set up periodic refresh
-    const interval = setInterval(() => {
-      loadStatistics()
-    }, 10000) // Update stats every 10 seconds
-    
-    // Reload settings when window gains focus (helps with persistence)
-    const handleWindowFocus = () => {
-      console.log('👁️ Window focused - checking for setting changes')
-      loadSettings()
-    }
-    
-    window.addEventListener('focus', handleWindowFocus)
-    
-    return () => {
-      clearInterval(interval)
-      window.removeEventListener('focus', handleWindowFocus)
-    }
-  }, []) // Remove dependency on functions to prevent loops
+  }, []) // Empty dependency array - only run once
 
+  // Periodic statistics refresh only (not settings)
   useEffect(() => {
-    // Check for changes and persist draft
+    const interval = setInterval(() => {
+      loadStatistics() // Only refresh statistics, NOT settings
+    }, 10000)
+
+    return () => clearInterval(interval)
+  }, [])
+
+  // Simple change detection
+  useEffect(() => {
     if (initialSettings) {
-      const currentSettingsStr = JSON.stringify(settings)
-      const initialSettingsStr = JSON.stringify(initialSettings)
-      const hasChanged = currentSettingsStr !== initialSettingsStr
-      
-      console.log('🔍 Settings change detection:', {
-        hasChanged,
-        currentSettings: settings.enabled,
-        initialSettings: initialSettings.enabled,
-        currentDevices: settings.enabledDevices.length,
-        initialDevices: initialSettings.enabledDevices.length
-      })
-      
-      setHasChanges(hasChanged)
-      
-      // Persist draft settings when changes are made (debounced)
-      if (hasChanged) {
-        const persistTimer = setTimeout(() => {
-          console.log('💾 Persisting draft settings due to change')
-          persistDraftSettings()
-        }, 500) // 500ms debounce
-        
-        return () => clearTimeout(persistTimer)
-      }
+      const changed = JSON.stringify(settings) !== JSON.stringify(initialSettings)
+      setHasChanges(changed)
     }
   }, [settings, initialSettings])
 
-  // Persist draft settings to localStorage with retry mechanism
-  const persistDraftSettings = () => {
-    try {
-      const draftData = {
-        settings,
-        timestamp: Date.now(),
-        version: '1.0'
-      }
-      localStorage.setItem('autoRecordingDraft', JSON.stringify(draftData))
-      console.log('💾 Draft settings persisted to localStorage:', draftData)
-    } catch (error) {
-      console.warn('⚠️ Failed to persist draft settings:', error)
-      // Try to clear corrupted data and retry once
-      try {
-        localStorage.removeItem('autoRecordingDraft')
-        localStorage.setItem('autoRecordingDraft', JSON.stringify({
-          settings,
-          timestamp: Date.now(),
-          version: '1.0'
-        }))
-        console.log('💾 Draft settings persisted after cleanup')
-      } catch (retryError) {
-        console.error('❌ Failed to persist draft settings after cleanup:', retryError)
-      }
+  // Unified handler for all setting changes
+  const handleSettingChange = (key: string, value: any) => {
+    console.log(`🔍 Setting change: ${key} = ${value}`)
+
+    // Clear existing timeout
+    if (saveTimeout) {
+      clearTimeout(saveTimeout)
+      setSaveTimeout(null)
     }
+
+    // Update settings immediately
+    const newSettings = { ...settings, [key]: value }
+    setSettings(newSettings)
+    setHasChanges(true)
+
+    // NEVER auto-save these critical settings
+    const criticalSettings = ['enabled', 'enabledDevices', 'chunkDuration']
+    if (criticalSettings.includes(key)) {
+      console.log('🔍 Critical setting changed - manual save required')
+      return
+    }
+
+    // Auto-save only for non-critical settings after delay
+    const timeout = setTimeout(() => {
+      if (!isSaving) { // Don't auto-save if already saving
+        saveSettings()
+      }
+    }, 3000)
+    setSaveTimeout(timeout)
   }
 
-
-
-  // Clear persisted draft when settings are saved
-  const clearPersistedDraft = () => {
-    try {
-      localStorage.removeItem('autoRecordingDraft')
-    } catch (error) {
-      console.warn('⚠️ Failed to clear persisted draft:', error)
-    }
+  // Specific handlers using the unified function
+  const handleEnabledChange = (checked: boolean) => {
+    handleSettingChange('enabled', checked)
   }
 
-  const loadSettings = async () => {
+  const handleChunkDurationChange = (value: string) => {
+    const numValue = parseInt(value) || 1
+    handleSettingChange('chunkDuration', numValue)
+  }
+
+  const handleQualityChange = (value: string) => {
+    handleSettingChange('quality', value)
+  }
+
+  const handleStorageChange = (value: string) => {
+    const numValue = parseInt(value) || 30
+    handleSettingChange('maxStorage', numValue)
+  }
+
+  const handleRetentionChange = (value: string) => {
+    const numValue = parseInt(value) || 1
+    handleSettingChange('retentionPeriod', numValue)
+  }
+
+  const toggleDeviceEnabled = (deviceId: string) => {
+    const newEnabledDevices = settings.enabledDevices.includes(deviceId)
+      ? settings.enabledDevices.filter(id => id !== deviceId)
+      : [...settings.enabledDevices, deviceId]
+
+    handleSettingChange('enabledDevices', newEnabledDevices)
+  }
+
+  const loadSettings = async (forceReload: boolean = false) => {
+    if (isSaving) {
+      console.log('⏸️ Skipping load during save operation')
+      return
+    }
+
     setIsLoading(true)
     setError(null)
 
     try {
-      console.log('⚙️ Loading auto-recording settings...')
+      console.log('⚙️ Loading auto-recording settings from server...')
       const currentSettings = await recordingService.getAutoRecordingSettings()
-      
+
       console.log('✅ Settings loaded from server:', currentSettings)
-      
-      // Check localStorage for draft settings
-      let finalSettings = currentSettings // Default to server settings
-      let shouldUseDraft = false
-      
-      try {
-        const draftData = localStorage.getItem('autoRecordingDraft')
-        
-        if (draftData) {
-          const parsed = JSON.parse(draftData)
-          const draftSettings = parsed.settings
-          const timestamp = parsed.timestamp
-          const version = parsed.version || '1.0'
-          const ageMinutes = Math.round((Date.now() - timestamp) / (60 * 1000))
-          const isRecent = ageMinutes < 120 // 2 hours
-          
-          console.log('📝 Found draft settings in localStorage:', {
-            timestamp: new Date(timestamp).toLocaleString(),
-            ageMinutes,
-            version,
-            isRecent,
-            draftEnabled: draftSettings?.enabled,
-            draftDevices: draftSettings?.enabledDevices?.length || 0,
-            serverEnabled: currentSettings.enabled,
-            serverDevices: currentSettings.enabledDevices?.length || 0
-          })
-          
-          if (isRecent && draftSettings && version === '1.0') {
-            // Use draft settings
-            finalSettings = { ...draftSettings }
-            shouldUseDraft = true
-            console.log('✅ Using draft settings (recent and valid)')
-          } else {
-            // Clean up expired/invalid draft
-            localStorage.removeItem('autoRecordingDraft')
-            console.log('🗑️ Cleaned up expired/invalid draft settings')
-          }
-        } else {
-          console.log('📭 No draft settings found - using server settings')
-        }
-      } catch (error) {
-        console.warn('⚠️ Error reading draft settings:', error)
-        localStorage.removeItem('autoRecordingDraft')
+
+      // Clear any drafts
+      localStorage.removeItem('autoRecordingDraft')
+
+      // Use the settings from the server as-is if they exist
+      const validatedSettings = {
+        enabled: currentSettings.enabled === true, // Respect server value
+        chunkDuration: currentSettings.chunkDuration || 1,
+        quality: currentSettings.quality || 'medium',
+        maxStorage: currentSettings.maxStorage || 10,
+        retentionPeriod: currentSettings.retentionPeriod || 1,
+        enabledDevices: currentSettings.enabledDevices || []
       }
-      
-      // Apply settings
-      console.log('🔄 Applying settings:', {
-        source: shouldUseDraft ? 'draft' : 'server',
-        enabled: finalSettings.enabled,
-        devices: finalSettings.enabledDevices?.length || 0,
-        chunkDuration: finalSettings.chunkDuration
-      })
-      
-      setSettings({ ...finalSettings })
-      setInitialSettings({ ...currentSettings }) // Always track server state as initial
-      
-      // Determine if there are unsaved changes
-      const hasUnsavedChanges = JSON.stringify(finalSettings) !== JSON.stringify(currentSettings)
-      setHasChanges(hasUnsavedChanges)
-      
-      if (hasUnsavedChanges) {
-        console.log('📊 Unsaved changes detected - will show save button')
-      }
-      
-      console.log('🔄 Settings comparison:', {
-        usingDraft: shouldUseDraft,
-        hasChanges,
-        current: shouldUseDraft ? 'draft' : 'server',
-        server: currentSettings
-      })
-      
+
+      setSettings(validatedSettings)
+      setInitialSettings(validatedSettings)
+      setHasChanges(false)
+
     } catch (err: any) {
       console.error('❌ Failed to load settings:', err)
       setError('Failed to load settings: ' + err.message)
-      toast.error('Failed to load auto-recording settings')
+
+      // Use safe defaults on error
+      const defaults = {
+        enabled: false,
+        chunkDuration: 1,
+        quality: 'medium',
+        maxStorage: 10,
+        retentionPeriod: 1,
+        enabledDevices: []
+      }
+      setSettings(defaults)
+      setInitialSettings(defaults)
     } finally {
       setIsLoading(false)
     }
   }
+
+  // Fix device filtering - only show ONLINE authenticated devices
+  const getAvailableDevices = () => {
+    return devices.filter(device => {
+      // Must be authenticated
+      if (!device.authenticated) return false
+
+      return true
+    })
+  }
+
+  // Use this for device selection
+  const availableDevices = getAvailableDevices()
 
   const loadStatistics = async () => {
     try {
@@ -246,11 +220,11 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
       const response = await fetch('http://localhost:3001/api/recordings/storage-info')
       if (response.ok) {
         const storageInfo = await response.json()
-        
+
         // Load active recordings
         const activeResponse = await fetch('http://localhost:3001/api/recordings/active')
         const activeData = activeResponse.ok ? await activeResponse.json() : { activeRecordings: [] }
-        
+
         setStatistics({
           activeRecordings: activeData.activeRecordings?.length || 0,
           totalRecordings: storageInfo.totalRecordings || 0,
@@ -263,72 +237,68 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
   }
 
   const saveSettings = async () => {
+    if (isSaving) return
+
     setIsSaving(true)
     setError(null)
 
     try {
-      console.log('💾 Saving auto-recording settings:', settings)
-      
-      // Validate settings
+      console.log('💾 Saving settings to server:', settings)
+
+      // Validate
       if (settings.enabled && settings.enabledDevices.length === 0) {
         throw new Error('Please select at least one device for auto-recording')
       }
 
-      if (settings.chunkDuration < 1 || settings.chunkDuration > 60) {
-        throw new Error('Chunk duration must be between 1 and 60 minutes')
+      // Ensure chunk duration is valid
+      const validChunkDuration = Math.max(1, Math.min(60, parseInt(String(settings.chunkDuration)) || 2))
+      const settingsToSave = {
+        ...settings,
+        chunkDuration: validChunkDuration
       }
 
-      if (settings.maxStorage < 1 || settings.maxStorage > 10000) {
-        throw new Error('Storage limit must be between 1 and 10,000 GB')
+      // Send directly to server without wrapper
+      const response = await fetch('http://localhost:3001/api/recordings/auto-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settingsToSave)
+      })
+
+      if (!response.ok) {
+        throw new Error(`Failed to save: ${response.statusText}`)
       }
 
-      if (settings.retentionPeriod < 1 || settings.retentionPeriod > 365) {
-        throw new Error('Retention period must be between 1 and 365 days')
-      }
+      const savedSettings = await response.json()
+      console.log('✅ Saved settings:', savedSettings)
 
-      // Add detailed debug logging for the save process
-      console.log('🔍 DEBUG: Starting save process with settings:', JSON.stringify(settings, null, 2))
-      
-      // Test endpoint first for debugging
-      try {
-        const testResponse = await fetch('http://localhost:3001/api/recordings/auto-settings/test', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ settings })
-        })
-        const testResult = await testResponse.json()
-        console.log('🧪 Test endpoint result:', testResult)
-      } catch (testError) {
-        console.warn('⚠️ Test endpoint failed:', testError)
-      }
-      
-      // Save settings
-      const updatedSettings = await recordingService.updateAutoRecordingSettings(settings)
-      
-      console.log('✅ Settings saved successfully:', updatedSettings)
-      setSettings(updatedSettings)
-      setInitialSettings(updatedSettings)
+      // Update local state with server response
+      setSettings(savedSettings)
+      setInitialSettings(savedSettings)
       setHasChanges(false)
-      
-      // Clear persisted draft since settings are now saved
-      clearPersistedDraft()
-      
-      // Notify parent component
-      onSettingsChange?.(updatedSettings)
-      
-      // Refresh statistics
-      await loadStatistics()
-      
+
+      // Clear save timeout
+      if (saveTimeout) {
+        clearTimeout(saveTimeout)
+        setSaveTimeout(null)
+      }
+
+      onSettingsChange?.(savedSettings)
+
       toast.success(
-        settings.enabled 
-          ? `Auto-recording enabled for ${settings.enabledDevices.length} device(s)`
+        savedSettings.enabled
+          ? `Auto-recording enabled: ${savedSettings.chunkDuration}min chunks for ${savedSettings.enabledDevices.length} device(s)`
           : 'Auto-recording disabled'
       )
-      
+
+      // Reload stats after saving
+      setTimeout(() => {
+        loadStatistics()
+      }, 2000)
+
     } catch (err: any) {
-      console.error('❌ Failed to save settings:', err)
-      setError('Failed to save settings: ' + err.message)
-      toast.error('Failed to save auto-recording settings')
+      console.error('❌ Save failed:', err)
+      setError(err.message)
+      toast.error('Failed to save settings')
     } finally {
       setIsSaving(false)
     }
@@ -339,30 +309,19 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
       setSettings(initialSettings)
       setHasChanges(false)
       setError(null)
-      clearPersistedDraft() // Clear draft when resetting
+      localStorage.removeItem('autoRecordingDraft') // Clear draft when resetting
       toast.info('Settings reset to last saved values')
     }
   }
 
-  const toggleDeviceEnabled = (deviceId: string) => {
-    const newEnabledDevices = settings.enabledDevices.includes(deviceId)
-      ? settings.enabledDevices.filter(id => id !== deviceId)
-      : [...settings.enabledDevices, deviceId]
-    
-    setSettings({
-      ...settings,
-      enabledDevices: newEnabledDevices
-    })
-  }
-
   const calculateEstimatedUsage = () => {
     if (!settings.enabled || settings.enabledDevices.length === 0) return '0 MB/day'
-    
+
     // Rough estimation: 1 minute of medium quality video = ~10MB
     const mbPerMinute = settings.quality === 'low' ? 5 : settings.quality === 'high' ? 20 : 10
     const minutesPerDay = 24 * 60 // Full day recording
     const totalMbPerDay = settings.enabledDevices.length * minutesPerDay * mbPerMinute
-    
+
     if (totalMbPerDay < 1024) {
       return `${Math.round(totalMbPerDay)} MB/day`
     } else {
@@ -383,17 +342,17 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
             Configure automatic recording with customizable chunk duration for all authenticated cameras
           </p>
         </div>
-        
+
         <div className="flex items-center space-x-2">
           {hasChanges && (
             <Badge variant="outline" className="text-orange-600 border-orange-300">
               Unsaved Changes
             </Badge>
           )}
-          
-          <Button 
-            variant="outline" 
-            onClick={loadSettings}
+
+          <Button
+            variant="outline"
+            onClick={() => loadSettings(true)}
             disabled={isLoading || isSaving}
           >
             <RefreshCw className={`w-4 h-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
@@ -423,7 +382,7 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
             </div>
           </CardContent>
         </Card>
-        
+
         <Card>
           <CardContent className="p-4">
             <div className="flex items-center space-x-2">
@@ -435,7 +394,7 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
             </div>
           </CardContent>
         </Card>
-        
+
         <Card>
           <CardContent className="p-4">
             <div className="flex items-center space-x-2">
@@ -447,7 +406,7 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
             </div>
           </CardContent>
         </Card>
-        
+
         <Card>
           <CardContent className="p-4">
             <div className="flex items-center space-x-2">
@@ -483,7 +442,7 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
             </div>
             <Switch
               checked={settings.enabled}
-              onCheckedChange={(checked) => setSettings({ ...settings, enabled: checked })}
+              onCheckedChange={handleEnabledChange}
               disabled={isLoading || isSaving}
             />
           </div>
@@ -497,7 +456,7 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
                 id="chunk-duration"
                 type="number"
                 value={settings.chunkDuration}
-                onChange={(e) => setSettings({ ...settings, chunkDuration: parseInt(e.target.value) || 2 })}
+                onChange={(e) => handleChunkDurationChange(e.target.value)}
                 min="1"
                 max="60"
                 disabled={isLoading || isSaving}
@@ -514,9 +473,9 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
             {/* Recording Quality */}
             <div className="space-y-2">
               <Label>Recording Quality</Label>
-              <Select 
-                value={settings.quality} 
-                onValueChange={(value) => setSettings({ ...settings, quality: value })}
+              <Select
+                value={settings.quality}
+                onValueChange={handleQualityChange}
                 disabled={isLoading || isSaving}
               >
                 <SelectTrigger>
@@ -537,7 +496,7 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
                 id="max-storage"
                 type="number"
                 value={settings.maxStorage}
-                onChange={(e) => setSettings({ ...settings, maxStorage: parseInt(e.target.value) || 100 })}
+                onChange={(e) => handleStorageChange(e.target.value)}
                 min="1"
                 max="10000"
                 disabled={isLoading || isSaving}
@@ -554,7 +513,7 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
                 id="retention-period"
                 type="number"
                 value={settings.retentionPeriod}
-                onChange={(e) => setSettings({ ...settings, retentionPeriod: parseInt(e.target.value) || 30 })}
+                onChange={(e) => handleRetentionChange(e.target.value)}
                 min="1"
                 max="365"
                 disabled={isLoading || isSaving}
@@ -590,39 +549,47 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {authenticatedDevices.length === 0 ? (
-            <Alert>
-              <AlertTriangle className="h-4 w-4" />
-              <AlertDescription>
-                No authenticated cameras available. Please authenticate at least one camera in the Device Discovery section.
-              </AlertDescription>
-            </Alert>
-          ) : (
-            <div className="space-y-3">
-              {authenticatedDevices.map((device) => (
-                <div key={device.id} className="flex items-center justify-between p-3 border rounded-lg">
-                  <div className="flex items-center space-x-3">
-                    <div>
-                      <div className="font-medium">{device.name}</div>
-                      <div className="text-sm text-gray-600">{device.ip_address}</div>
+          {(() => {
+            // Get available devices (authenticated ones)
+            const availableDevices = getAvailableDevices()
+
+            if (availableDevices.length === 0) {
+              return (
+                <Alert>
+                  <AlertTriangle className="h-4 w-4" />
+                  <AlertDescription>
+                    No authenticated cameras available. Please authenticate at least one camera in the Device Discovery section.
+                  </AlertDescription>
+                </Alert>
+              )
+            }
+
+            return (
+              <div className="space-y-3">
+                {availableDevices.map((device) => (
+                  <div key={device.id} className="flex items-center justify-between p-3 border rounded-lg">
+                    <div className="flex items-center space-x-3">
+                      <div>
+                        <div className="font-medium">{device.name}</div>
+                        <div className="text-sm text-gray-600">{device.ip_address}</div>
+                      </div>
+                      {/* Don't show status badge here since it might be incorrect */}
+                      <Badge variant="outline" className="text-green-600 border-green-300">
+                        Authenticated
+                      </Badge>
                     </div>
-                    
-                    <Badge variant="outline" className="text-green-600 border-green-300">
-                      Authenticated
-                    </Badge>
+                    <Switch
+                      checked={settings.enabledDevices.includes(device.id)}
+                      onCheckedChange={() => toggleDeviceEnabled(device.id)}
+                      disabled={isLoading || isSaving}
+                    />
                   </div>
-                  
-                  <Switch
-                    checked={settings.enabledDevices.includes(device.id)}
-                    onCheckedChange={() => toggleDeviceEnabled(device.id)}
-                    disabled={isLoading || isSaving}
-                  />
-                </div>
-              ))}
-            </div>
-          )}
-          
-          {settings.enabled && settings.enabledDevices.length === 0 && authenticatedDevices.length > 0 && (
+                ))}
+              </div>
+            )
+          })()}
+
+          {settings.enabled && settings.enabledDevices.length === 0 && getAvailableDevices().length > 0 && (
             <Alert className="mt-4">
               <AlertTriangle className="h-4 w-4" />
               <AlertDescription>
@@ -642,7 +609,7 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
               Auto Recording Enabled
             </Badge>
           )}
-          
+
           {statistics.activeRecordings > 0 && (
             <Badge variant="destructive">
               <Disc className="w-3 h-3 mr-1" />
@@ -650,7 +617,7 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
             </Badge>
           )}
         </div>
-        
+
         <div className="flex items-center space-x-2">
           {hasChanges && (
             <Button
@@ -661,7 +628,7 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
               Reset Changes
             </Button>
           )}
-          
+
           <Button
             onClick={saveSettings}
             disabled={isLoading || isSaving || !hasChanges}

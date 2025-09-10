@@ -62,16 +62,16 @@ export function Sidebar({
       badge: 'PTZ'
     },
     {
-      id: 'video-recording',
-      label: 'Video Recording',
-      icon: Video,
-      description: 'Record and manage videos'
-    },
-    {
       id: 'auto-recording',
       label: 'Auto Recording',
       icon: HardDrive,
       description: 'Automatic recording with chunks'
+    },
+    {
+      id: 'video-recording',
+      label: 'Video Recording',
+      icon: Video,
+      description: 'Record and manage videos'
     },
     {
       id: 'motion-detection',
@@ -103,25 +103,24 @@ export function Sidebar({
           {deviceTasks.map((task) => {
             const Icon = task.icon
             const isActive = activeTask === task.id
-            
+
             return (
               <Button
                 key={task.id}
                 variant={isActive ? "default" : "ghost"}
                 size="sm"
                 onClick={() => onTaskChange(task.id)}
-                className={`w-full justify-start ${
-                  isActive 
-                    ? 'bg-blue-600 text-white hover:bg-blue-700' 
+                className={`w-full justify-start ${isActive
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
                     : 'text-gray-700 hover:text-gray-900 hover:bg-gray-50'
-                }`}
+                  }`}
                 title={task.description}
               >
                 <Icon className="w-4 h-4 mr-3" />
                 <span className="flex-1 text-left">{task.label}</span>
                 {task.badge && (
-                  <Badge 
-                    variant={isActive ? "secondary" : "outline"} 
+                  <Badge
+                    variant={isActive ? "secondary" : "outline"}
                     className="text-xs ml-2"
                   >
                     {task.badge}
@@ -146,7 +145,7 @@ export function Sidebar({
             <Plus className="w-4 h-4 mr-2" />
             Add Device
           </Button>
-          
+
           <Button
             variant="outline"
             size="sm"
@@ -156,7 +155,7 @@ export function Sidebar({
             <RefreshCw className="w-4 h-4 mr-2" />
             Refresh Status
           </Button>
-          
+
           <Button
             variant="outline"
             size="sm"
@@ -175,7 +174,7 @@ export function Sidebar({
       {/* System Status */}
       <div className="p-4 flex-1">
         <h3 className="text-sm font-medium text-gray-900 mb-3">System Status</h3>
-        
+
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-sm">ONVIF VMS</CardTitle>
@@ -187,21 +186,21 @@ export function Sidebar({
                 Connected
               </Badge>
             </div>
-            
+
             <div className="flex items-center justify-between text-sm">
               <span className="text-gray-600">Database</span>
               <Badge variant="default" className="text-xs">
                 Active
               </Badge>
             </div>
-            
+
             <div className="flex items-center justify-between text-sm">
               <span className="text-gray-600">Discovery</span>
               <Badge variant="default" className="text-xs">
                 Ready
               </Badge>
             </div>
-            
+
             <div className="flex items-center justify-between text-sm">
               <span className="text-gray-600">Streaming</span>
               <Badge variant="secondary" className="text-xs">
@@ -223,7 +222,7 @@ export function Sidebar({
             <Settings className="w-3 h-3 mr-2" />
             Edit Device
           </Button>
-          
+
           <Button
             variant="outline"
             size="sm"

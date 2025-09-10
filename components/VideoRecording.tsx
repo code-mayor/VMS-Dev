@@ -22,7 +22,8 @@ import {
   Video,
   Calendar,
   Timer,
-  PlayCircle
+  PlayCircle,
+  Disc
 } from 'lucide-react'
 
 interface Device {
@@ -66,6 +67,12 @@ interface StorageInfo {
   recentRecordings: number
   autoRecordingEnabled: boolean
   enabledDevices: number
+  directoryStatus?: {
+    success: boolean
+    directory: string
+    error?: string
+    recommendations?: string[]
+  }
 }
 
 interface VideoRecordingProps {
@@ -74,18 +81,26 @@ interface VideoRecordingProps {
   onDeviceSelect?: (device: Device) => void
 }
 
-// Error Boundary Component
-class VideoRecordingErrorBoundary extends React.Component {
-  constructor(props) {
+interface ErrorBoundaryState {
+  hasError: boolean
+  error: Error | null
+}
+
+interface ErrorBoundaryProps {
+  children: React.ReactNode
+}
+
+class VideoRecordingErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
     super(props)
     this.state = { hasError: false, error: null }
   }
 
-  static getDerivedStateFromError(error) {
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
     return { hasError: true, error }
   }
 
-  componentDidCatch(error, errorInfo) {
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     console.error('VideoRecording Error Boundary caught an error:', error, errorInfo)
   }
 
@@ -119,7 +134,7 @@ class VideoRecordingErrorBoundary extends React.Component {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => this.setState({ hasError: false, error: null })}
+                    onClick={() => window.location.reload()}
                   >
                     Reload Page
                   </Button>
@@ -137,7 +152,6 @@ class VideoRecordingErrorBoundary extends React.Component {
         </div>
       )
     }
-
     return this.props.children
   }
 }
@@ -186,6 +200,7 @@ function VideoRecordingContent({ devices, selectedDevice, onDeviceSelect }: Vide
     try {
       console.log('📹 Loading recordings...')
 
+      // Load completed recordings
       const response = await fetch('http://localhost:3001/api/recordings', {
         method: 'GET',
         headers: {
@@ -199,21 +214,50 @@ function VideoRecordingContent({ devices, selectedDevice, onDeviceSelect }: Vide
 
       const data = await response.json()
 
-      // Handle different response formats
-      const recordingsData = data.recordings || data.data || []
-      const activeData = data.activeRecordings || data.active || []
+      // Load active recordings separately
+      const activeResponse = await fetch('http://localhost:3001/api/recordings/active')
+      let activeRecordingsList = []
 
-      setRecordings(Array.isArray(recordingsData) ? recordingsData : [])
-      setActiveRecordings(Array.isArray(activeData) ? activeData : [])
+      if (activeResponse.ok) {
+        const activeData = await activeResponse.json()
+        activeRecordingsList = activeData.activeRecordings || []
 
-      console.log(`📹 Loaded ${recordingsData.length || 0} recordings, ${activeData.length || 0} active`)
+        // Convert active recordings to recording format for display
+        const activeAsRecordings = activeRecordingsList.map(ar => ({
+          id: ar.recordingId,
+          deviceId: ar.deviceId,
+          deviceName: devices.find(d => d.id === ar.deviceId)?.name || ar.deviceId,
+          filename: ar.filename || 'Recording in progress...',
+          startTime: ar.startTime,
+          endTime: null,
+          duration: ar.duration || 0,
+          size: 0,
+          quality: 'medium',
+          type: ar.type || 'auto',
+          status: 'recording' as const,
+          path: ''
+        }))
+
+        // Combine active and completed recordings
+        const allRecordings = [...activeAsRecordings, ...(data.recordings || [])]
+
+        // Remove duplicates based on ID
+        const uniqueRecordings = Array.from(
+          new Map(allRecordings.map(r => [r.id, r])).values()
+        )
+
+        setRecordings(uniqueRecordings)
+        setActiveRecordings(activeRecordingsList)
+      } else {
+        setRecordings(data.recordings || [])
+        setActiveRecordings([])
+      }
+
       setError(null)
 
     } catch (err: any) {
       console.error('❌ Failed to load recordings:', err)
-      setError('Failed to load recordings: ' + (err.message || 'Unknown error'))
-
-      // Set empty arrays on error to prevent crashes
+      setError('Failed to load recordings: ' + err.message)
       setRecordings([])
       setActiveRecordings([])
     }
@@ -470,6 +514,31 @@ function VideoRecordingContent({ devices, selectedDevice, onDeviceSelect }: Vide
           </Alert>
         )}
 
+        {/* Directory Status Alert */}
+        {(!storageInfo || storageInfo.directoryStatus?.success === false) && (
+          <Alert variant="destructive">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertDescription>
+              <div className="space-y-2">
+                <div className="font-medium">Recordings Directory Issue</div>
+                <div className="text-sm">
+                  The recordings directory may not be properly configured. This could prevent recordings from being saved.
+                </div>
+                <div className="text-sm text-gray-600">
+                  Directory: {storageInfo?.directoryStatus?.directory || '/public/recordings'}
+                </div>
+                {storageInfo?.directoryStatus?.recommendations && (
+                  <ul className="text-sm list-disc list-inside mt-2">
+                    {storageInfo.directoryStatus.recommendations.map((rec, idx) => (
+                      <li key={idx}>{rec}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </AlertDescription>
+          </Alert>
+        )}
+
         {/* Storage Info */}
         {storageInfo && (
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -525,6 +594,60 @@ function VideoRecordingContent({ devices, selectedDevice, onDeviceSelect }: Vide
               </CardContent>
             </Card>
           </div>
+        )}
+
+        {activeRecordings.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center space-x-2">
+                <Disc className="w-5 h-5 text-red-500 animate-pulse" />
+                <span>Active Recordings</span>
+                <Badge variant="destructive">{activeRecordings.length} Recording</Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3">
+                {activeRecordings.map((recording: any) => {
+                  const device = devices.find(d => d.id === recording.deviceId)
+                  const elapsedTime = recording.startTime
+                    ? Math.floor((Date.now() - new Date(recording.startTime).getTime()) / 1000)
+                    : 0
+
+                  return (
+                    <div key={recording.recordingId} className="flex items-center justify-between p-3 border rounded-lg bg-red-50">
+                      <div className="flex items-center space-x-3">
+                        <Disc className="w-4 h-4 text-red-500 animate-pulse" />
+                        <div>
+                          <div className="font-medium">{device?.name || recording.deviceId}</div>
+                          <div className="text-sm text-gray-600">
+                            Type: {recording.type} | Started: {formatDateTime(recording.startTime)}
+                          </div>
+                          <div className="text-sm text-gray-600">
+                            Elapsed: {formatDuration(elapsedTime)} / Target: {formatDuration(recording.duration || 0)}
+                          </div>
+                        </div>
+                        <Badge variant={recording.type === 'auto' ? 'secondary' : 'default'}>
+                          {recording.type}
+                        </Badge>
+                      </div>
+
+                      {recording.type === 'manual' && (
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => stopRecording(recording.recordingId)}
+                          disabled={isLoading}
+                        >
+                          <Square className="w-4 h-4 mr-1" />
+                          Stop
+                        </Button>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </CardContent>
+          </Card>
         )}
 
         {/* Manual Recording Controls */}
