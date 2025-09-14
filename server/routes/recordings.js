@@ -6,6 +6,26 @@ const { spawn } = require('child_process')
 const { v4: uuidv4 } = require('uuid')
 const router = express.Router()
 
+// Load default configuration
+const DEFAULT_CONFIG_PATH = path.join(__dirname, '..', 'config', 'auto-recording-defaults.json')
+let defaultConfig = {}
+try {
+  defaultConfig = JSON.parse(fs.readFileSync(DEFAULT_CONFIG_PATH, 'utf8'))
+  console.log('📋 Loaded default configuration from:', DEFAULT_CONFIG_PATH)
+} catch (error) {
+  console.warn('⚠️ Could not load default config, using fallback defaults:', error.message)
+  defaultConfig = {
+    defaults: {
+      enabled: false,
+      chunkDuration: 1,
+      quality: 'medium',
+      maxStorage: 30,
+      retentionPeriod: 1,
+      enabledDevices: []
+    }
+  }
+}
+
 // FFmpeg processes for active recordings
 const ffmpegProcesses = new Map() // recordingId -> process
 
@@ -52,7 +72,7 @@ const ensureRecordingsDirectory = async () => {
 // Initialize directory on module load
 ensureRecordingsDirectory()
 
-// Load auto-recording settings
+// Load auto-recording settings with proper defaults
 function loadAutoRecordingSettings() {
   try {
     if (fs.existsSync(AUTO_RECORDING_CONFIG_PATH)) {
@@ -60,65 +80,55 @@ function loadAutoRecordingSettings() {
       const settings = JSON.parse(data)
       console.log('📋 Loaded settings from file:', settings)
 
-      // CRITICAL: Validate loaded settings
-      if (typeof settings.enabled !== 'boolean') {
-        settings.enabled = false; // Default to disabled
+      // Add enabledDevices if missing (for backward compatibility)
+      if (!settings.hasOwnProperty('enabledDevices')) {
+        settings.enabledDevices = []
       }
 
-      return settings
+      // Merge with defaults to ensure all fields exist
+      const mergedSettings = {
+        ...defaultConfig.defaults,
+        ...settings,
+        // CRITICAL: Ensure enabled is always a boolean
+        enabled: settings.enabled === true,
+        enabledDevices: settings.enabledDevices || []
+      }
+
+      // Validate types
+      mergedSettings.chunkDuration = parseInt(mergedSettings.chunkDuration) || defaultConfig.defaults.chunkDuration
+      mergedSettings.maxStorage = parseInt(mergedSettings.maxStorage) || defaultConfig.defaults.maxStorage
+      mergedSettings.retentionPeriod = parseInt(mergedSettings.retentionPeriod) || defaultConfig.defaults.retentionPeriod
+
+      return mergedSettings
     }
   } catch (error) {
     console.warn('⚠️ Could not load settings:', error.message)
   }
 
-  // Return safe defaults - everything disabled
-  const defaultSettings = {
-    enabled: false,  // MUST be false by default
-    chunkDuration: 1,
-    quality: 'medium',
-    maxStorage: 30,
-    retentionPeriod: 1,
-    enabledDevices: []
+  // Return safe defaults from config file
+  console.log('📋 No settings file - using defaults from config')
+  return {
+    ...defaultConfig.defaults,
+    enabledDevices: []  // Add empty array here for runtime
   }
-
-  console.log('📋 No settings file - using safe defaults (disabled)')
-  return defaultSettings
 }
-
-// Single GET endpoint that preserves user settings while ensuring type safety
-router.get('/auto-settings', (req, res) => {
-  // Load settings if not already loaded
-  if (!autoRecordingSettings) {
-    autoRecordingSettings = loadAutoRecordingSettings()
-  }
-
-  // Type validation WITHOUT changing user values
-  const validatedSettings = {
-    // Preserve user's enabled choice - just ensure it's a boolean
-    enabled: Boolean(autoRecordingSettings.enabled),
-
-    // Preserve user's values - only use defaults if value is null/undefined
-    chunkDuration: autoRecordingSettings.chunkDuration ?? 1,
-    quality: autoRecordingSettings.quality || 'medium',
-    maxStorage: autoRecordingSettings.maxStorage ?? 10,
-    retentionPeriod: autoRecordingSettings.retentionPeriod ?? 1,
-
-    // Ensure enabledDevices is an array
-    enabledDevices: Array.isArray(autoRecordingSettings.enabledDevices)
-      ? autoRecordingSettings.enabledDevices
-      : []
-  }
-
-  console.log('📖 Returning auto-recording settings:', validatedSettings)
-  res.json(validatedSettings)
-})
 
 // Save auto-recording settings
 function saveAutoRecordingSettings(settings) {
   try {
-    const data = JSON.stringify(settings, null, 2)
+    // Ensure all required fields exist
+    const settingsToSave = {
+      enabled: Boolean(settings.enabled),
+      chunkDuration: parseInt(settings.chunkDuration) || defaultConfig.defaults.chunkDuration,
+      quality: settings.quality || defaultConfig.defaults.quality,
+      maxStorage: parseInt(settings.maxStorage) || defaultConfig.defaults.maxStorage,
+      retentionPeriod: parseInt(settings.retentionPeriod) || defaultConfig.defaults.retentionPeriod,
+      enabledDevices: Array.isArray(settings.enabledDevices) ? settings.enabledDevices : []
+    }
+
+    const data = JSON.stringify(settingsToSave, null, 2)
     fs.writeFileSync(AUTO_RECORDING_CONFIG_PATH, data, 'utf8')
-    console.log('💾 Saved auto-recording settings to file:', settings)
+    console.log('💾 Saved auto-recording settings to file:', settingsToSave)
     return true
   } catch (error) {
     console.error('❌ Failed to save auto-recording settings:', error)
@@ -129,7 +139,7 @@ function saveAutoRecordingSettings(settings) {
 // Initialize auto-recording settings
 let autoRecordingSettings = loadAutoRecordingSettings()
 
-let activeRecordings = new Map() // deviceId -> recordingInfo
+let activeRecordings = new Map() // recordingId -> recordingInfo
 let recordingTimers = new Map() // deviceId -> timer
 
 // Helper function
@@ -339,145 +349,26 @@ async function startAutoRecording(deviceId, chunkDuration, dbConnection) {
   }
 }
 
-// CRITICAL FIX: User's TESTED Working FFmpeg command - prevents buffer overflow - RECORDS IN AVI!
-function startFFmpegRecordingFixed(deviceId, outputPath, recording, dbConnection) {
-  try {
-    console.log('🎬 Starting AVI recording with USER-TESTED working FFmpeg commands for device:', deviceId)
-
-    // Get device details from recording object or use defaults
-    const rtspUsername = recording.rtsp_username || 'test'
-    const rtspPassword = recording.rtsp_password || 'Test@123'
-    const deviceIp = recording.ip || '192.168.226.201'
-
-    const rtspUrl = `rtsp://${rtspUsername}:${rtspPassword}@${deviceIp}:554/profile1`
-
-    console.log('📁 Final output path:', outputPath)
-    console.log('📡 RTSP URL:', rtspUrl.replace(/(:[\w@]+@)/, ':***@'))
-
-    // Calculate duration in seconds for 4-minute chunks
-    const durationSeconds = autoRecordingSettings.chunkDuration * 60
-
-    console.log('🔧 Building USER-TESTED working FFmpeg command (prevents buffer overflow) - AVI FORMAT')
-
-    const command = [
-      'ffmpeg',
-      '-rtsp_transport', 'tcp',
-      '-fflags', '+genpts',
-      '-avoid_negative_ts', 'make_zero',
-      '-analyzeduration', '10000000',
-      '-probesize', '10000000',
-      '-rw_timeout', '30000000',
-      '-i', rtspUrl,
-      '-c:v', 'copy',
-      '-c:a', 'copy',
-      '-t', durationSeconds.toString(),
-      '-f', 'avi',
-      '-threads', '2',
-      '-y',
-      outputPath
-    ]
-
-    console.log('🔧 USER-TESTED Working FFmpeg command (AVI):', command.join(' ').replace(rtspUrl, rtspUrl.replace(/(:[\w@]+@)/, ':***@')))
-
-    const process = spawn(command[0], command.slice(1), {
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-
-    // Store process for tracking
-    ffmpegProcesses.set(recording.id, process)
-
-    console.log('✅ FFmpeg process started with PID:', process.pid)
-
-    // Handle process events
-    process.stderr.on('data', (data) => {
-      const output = data.toString()
-      // Only log errors, not normal progress to avoid spam
-      if (output.includes('error') || output.includes('Error') || output.includes('failed')) {
-        console.log('⚠️ FFmpeg stderr:', output.trim())
-      }
-    })
-
-    process.on('close', async (code) => {
-      console.log(`🛑 FFmpeg process ended for ${deviceId} with code ${code}`)
-      ffmpegProcesses.delete(recording.id)
-
-      // Update recording status in database
-      if (activeRecordings.has(deviceId)) {
-        const recordingInfo = activeRecordings.get(deviceId)
-        const endTime = new Date()
-
-        // Calculate file size
-        if (fs.existsSync(outputPath)) {
-          const stats = fs.statSync(outputPath)
-          const duration = Math.floor((endTime - new Date(recordingInfo.recording.startTime)) / 1000)
-
-          // Update recording in MySQL database
-          const updateQuery = `
-            UPDATE recordings 
-            SET end_time = ?, file_size = ?, duration = ?
-            WHERE id = ?
-          `
-
-          try {
-            await dbConnection.run(updateQuery, [
-              endTime,
-              stats.size,
-              duration,
-              recording.id
-            ])
-
-            console.log(`📊 AVI Recording completed: ${stats.size} bytes, ${duration} seconds`)
-          } catch (error) {
-            console.error('Error updating recording in database:', error)
-          }
-        } else {
-          console.log('❌ Recording file not found after FFmpeg completion')
-        }
-
-        activeRecordings.delete(deviceId)
-      }
-    })
-
-    process.on('error', (error) => {
-      console.error('❌ FFmpeg process error:', error)
-      ffmpegProcesses.delete(recording.id)
-      if (activeRecordings.has(deviceId)) {
-        activeRecordings.delete(deviceId)
-      }
-    })
-
-    return true
-
-  } catch (error) {
-    console.error('❌ Failed to start FFmpeg recording:', error)
-    return false
-  }
-}
-
-// Legacy function name mapping
-const startFFmpegRecording = startFFmpegRecordingFixed
-
 async function stopRecording(recordingId, dbConnection) {
   try {
     console.log(`🛑 Stopping recording: ${recordingId}`)
 
-    // Find the recording in database
-    const query = `SELECT * FROM recordings WHERE id = ?`
-    const recording = await dbConnection.get(query, [recordingId])
+    // Find the recording in activeRecordings map
+    const recordingInfo = activeRecordings.get(recordingId)
 
-    if (!recording) {
-      return { success: false, error: 'Recording not found' }
+    if (!recordingInfo) {
+      // Try to find by checking all active recordings
+      for (const [id, info] of activeRecordings.entries()) {
+        if (info.recordingId === recordingId) {
+          recordingInfo = info
+          break
+        }
+      }
+
+      if (!recordingInfo) {
+        return { success: false, error: 'Active recording not found' }
+      }
     }
-
-    // Find active recording info
-    const deviceEntry = Array.from(activeRecordings.entries())
-      .find(([deviceId, info]) => info.recordingId === recordingId)
-
-    if (!deviceEntry) {
-      return { success: false, error: 'Active recording not found' }
-    }
-
-    const [deviceId, recordingInfo] = deviceEntry
 
     // Stop FFmpeg process
     const process = ffmpegProcesses.get(recordingId)
@@ -497,14 +388,13 @@ async function stopRecording(recordingId, dbConnection) {
 
     // Update recording in database
     const endTime = new Date()
-    const startTime = new Date(recording.start_time)
+    const startTime = recordingInfo.startTime
     const duration = Math.floor((endTime - startTime) / 1000)
 
     // Check file size
-    const filePath = path.join(RECORDINGS_DIR, recording.filename)
     let fileSize = 0
-    if (fs.existsSync(filePath)) {
-      const stats = fs.statSync(filePath)
+    if (fs.existsSync(recordingInfo.outputPath)) {
+      const stats = fs.statSync(recordingInfo.outputPath)
       fileSize = stats.size
       console.log(`📊 Final recording: ${stats.size} bytes, ${duration} seconds`)
     } else {
@@ -517,10 +407,10 @@ async function stopRecording(recordingId, dbConnection) {
       SET end_time = ?, duration = ?, file_size = ?
       WHERE id = ?
     `
-    await dbConnection.run(updateQuery, [endTime, duration, fileSize, recordingId])
+    await dbConnection.run(updateQuery, [endTime, duration, fileSize, recordingId.substring(0, 36)])
 
     // Remove from active recordings
-    activeRecordings.delete(deviceId)
+    activeRecordings.delete(recordingId)
 
     console.log(`✅ Recording stopped: ${recordingId}`)
 
@@ -528,7 +418,7 @@ async function stopRecording(recordingId, dbConnection) {
       success: true,
       message: 'Recording stopped successfully',
       recording: {
-        ...recording,
+        id: recordingId,
         endTime,
         duration,
         size: fileSize,
@@ -555,23 +445,35 @@ function startAutoRecordingsForDevices(deviceIds, dbConnection) {
   })
   recordingTimers.clear()
 
-  deviceIds.forEach(async (deviceId) => {
-    try {
-      // Check if device exists and is available
-      const device = await getDeviceById(deviceId, dbConnection)
-      if (!device) {
-        console.warn(`⚠️ Device ${deviceId} not found, skipping`)
-        return
-      }
+  // Stop any existing auto recordings for these devices
+  const existingAutoRecordings = Array.from(activeRecordings.entries())
+    .filter(([id, info]) => info.type === 'auto' && deviceIds.includes(info.deviceId))
 
-      // Start first chunk immediately
-      console.log(`🎬 Starting continuous recording for ${device.name}`)
-      await startAutoRecording(deviceId, autoRecordingSettings.chunkDuration, dbConnection)
-
-    } catch (error) {
-      console.error(`❌ Failed to start auto-recording for ${deviceId}:`, error)
-    }
+  existingAutoRecordings.forEach(([id, info]) => {
+    console.log(`🛑 Stopping existing auto-recording: ${id}`)
+    stopRecording(id, dbConnection)
   })
+
+  // Start new recordings after a short delay to ensure cleanup
+  setTimeout(() => {
+    deviceIds.forEach(async (deviceId) => {
+      try {
+        // Check if device exists and is available
+        const device = await getDeviceById(deviceId, dbConnection)
+        if (!device) {
+          console.warn(`⚠️ Device ${deviceId} not found, skipping`)
+          return
+        }
+
+        // Start first chunk immediately
+        console.log(`🎬 Starting continuous recording for ${device.name}`)
+        await startAutoRecording(deviceId, autoRecordingSettings.chunkDuration, dbConnection)
+
+      } catch (error) {
+        console.error(`❌ Failed to start auto-recording for ${deviceId}:`, error)
+      }
+    })
+  }, 1000)
 }
 
 function stopAllAutoRecordings(dbConnection) {
@@ -584,11 +486,11 @@ function stopAllAutoRecordings(dbConnection) {
   recordingTimers.clear()
 
   const autoRecordings = Array.from(activeRecordings.entries())
-    .filter(([deviceId, info]) => info.type === 'auto')
+    .filter(([id, info]) => info.type === 'auto')
 
-  autoRecordings.forEach(async ([deviceId, info]) => {
-    console.log(`🛑 Stopping auto-recording for device: ${deviceId}`)
-    await stopRecording(info.recordingId, dbConnection)
+  autoRecordings.forEach(async ([id, info]) => {
+    console.log(`🛑 Stopping auto-recording: ${id}`)
+    await stopRecording(id, dbConnection)
   })
 
   console.log(`✅ Stopped ${autoRecordings.length} auto-recordings`)
@@ -634,7 +536,7 @@ router.get('/storage-info', async (req, res) => {
       console.warn('Could not get recent stats:', e.message)
     }
 
-    const maxStorage = autoRecordingSettings.maxStorage || 30
+    const maxStorage = autoRecordingSettings.maxStorage || defaultConfig.defaults.maxStorage
     const maxStorageBytes = maxStorage * 1024 * 1024 * 1024
     const totalSize = parseInt(stats.totalSize) || 0
     const usagePercentage = totalSize > 0 && maxStorageBytes > 0
@@ -660,10 +562,10 @@ router.get('/storage-info', async (req, res) => {
       totalRecordings: 0,
       totalSize: 0,
       totalSizeFormatted: '0 Bytes',
-      maxStorage: 30,
+      maxStorage: defaultConfig.defaults.maxStorage,
       usagePercentage: 0,
-      freeSpace: 30 * 1024 * 1024 * 1024,
-      freeSpaceFormatted: '30 GB',
+      freeSpace: defaultConfig.defaults.maxStorage * 1024 * 1024 * 1024,
+      freeSpaceFormatted: `${defaultConfig.defaults.maxStorage} GB`,
       recentRecordings: 0,
       autoRecordingEnabled: false,
       enabledDevices: 0,
@@ -672,9 +574,13 @@ router.get('/storage-info', async (req, res) => {
   }
 })
 
-// router.get('/auto-settings', (req, res) => {
-//   res.json(autoRecordingSettings)
-// })
+router.get('/auto-settings', (req, res) => {
+  // Reload settings to ensure we have the latest
+  autoRecordingSettings = loadAutoRecordingSettings()
+
+  console.log('📖 Returning auto-recording settings:', autoRecordingSettings)
+  res.json(autoRecordingSettings)
+})
 
 router.put('/auto-settings', async (req, res) => {
   try {
@@ -689,13 +595,13 @@ router.put('/auto-settings', async (req, res) => {
       return res.status(400).json({ error: 'Settings required' })
     }
 
-    // Validate and ensure all fields
+    // Validate and ensure all fields with defaults from config
     const validatedSettings = {
       enabled: Boolean(newSettings.enabled),
-      chunkDuration: parseInt(newSettings.chunkDuration) || 4,
-      quality: newSettings.quality || 'medium',
-      maxStorage: parseInt(newSettings.maxStorage) || 30,
-      retentionPeriod: parseInt(newSettings.retentionPeriod) || 2,
+      chunkDuration: parseInt(newSettings.chunkDuration) || defaultConfig.defaults.chunkDuration,
+      quality: newSettings.quality || defaultConfig.defaults.quality,
+      maxStorage: parseInt(newSettings.maxStorage) || defaultConfig.defaults.maxStorage,
+      retentionPeriod: parseInt(newSettings.retentionPeriod) || defaultConfig.defaults.retentionPeriod,
       enabledDevices: Array.isArray(newSettings.enabledDevices) ? newSettings.enabledDevices : []
     }
 
@@ -710,23 +616,29 @@ router.put('/auto-settings', async (req, res) => {
     // Save to file IMMEDIATELY
     const saved = saveAutoRecordingSettings(autoRecordingSettings)
     if (!saved) {
+      // Rollback on save failure
+      autoRecordingSettings = previousSettings
       throw new Error('Failed to save settings to file')
     }
 
-    // Stop all recordings if settings changed
-    if (previousSettings.enabled !== validatedSettings.enabled ||
+    // Handle auto-recording state changes
+    const needsRestart = previousSettings.enabled !== validatedSettings.enabled ||
       previousSettings.chunkDuration !== validatedSettings.chunkDuration ||
-      JSON.stringify(previousSettings.enabledDevices) !== JSON.stringify(validatedSettings.enabledDevices)) {
+      JSON.stringify(previousSettings.enabledDevices) !== JSON.stringify(validatedSettings.enabledDevices)
 
+    if (needsRestart) {
       console.log('🛑 Settings changed, restarting auto-recordings...')
+
+      // Stop all existing auto-recordings
       stopAllAutoRecordings(dbConnection)
 
       // Start new recordings if enabled
       if (validatedSettings.enabled && validatedSettings.enabledDevices.length > 0) {
         console.log('🎬 Starting auto-recordings with new settings')
+        // Delay to ensure cleanup completes
         setTimeout(() => {
           startAutoRecordingsForDevices(validatedSettings.enabledDevices, dbConnection)
-        }, 1000)
+        }, 2000)
       }
     }
 
@@ -753,7 +665,7 @@ router.post('/start', async (req, res) => {
 
     // Check for existing recording
     const existingRecording = Array.from(activeRecordings.values())
-      .find(r => r.deviceId === deviceId)
+      .find(r => r.deviceId === deviceId && r.type === 'manual')
 
     if (existingRecording) {
       return res.status(400).json({
@@ -798,13 +710,19 @@ router.post('/start', async (req, res) => {
       status: 'recording'
     }, dbConnection)
 
-    activeRecordings.set(recordingId, {
+    const recordingInfo = {
       recordingId,
       deviceId,
       process: ffmpegProcess,
-      startTime: startTime.toISOString(),
+      startTime: startTime,
+      outputPath,
+      filename,
+      duration,
       type: 'manual'
-    })
+    }
+
+    activeRecordings.set(recordingId, recordingInfo)
+    ffmpegProcesses.set(recordingId, ffmpegProcess)
 
     // Auto-stop after duration
     if (duration > 0) {
@@ -906,13 +824,14 @@ router.get('/', async (req, res) => {
       }
     })
 
-    // Get active recordings
-    const activeRecordingsList = Array.from(activeRecordings.entries()).map(([deviceId, info]) => ({
-      deviceId,
+    // Get active recordings with proper format
+    const activeRecordingsList = Array.from(activeRecordings.entries()).map(([recordingId, info]) => ({
+      deviceId: info.deviceId,
       recordingId: info.recordingId,
-      startTime: info.startTime,
+      startTime: info.startTime instanceof Date ? info.startTime.toISOString() : info.startTime,
       type: info.type,
-      recording: info.recording
+      duration: info.duration,
+      filename: info.filename
     }))
 
     res.json({
@@ -968,7 +887,7 @@ router.get('/:recordingId/download', async (req, res) => {
     console.log(`✅ Sending file: ${recording.filename} (${stats.size} bytes)`)
 
     // Set headers for download
-    res.setHeader('Content-Type', 'video/x-msvideo')
+    res.setHeader('Content-Type', 'video/mp4')
     res.setHeader('Content-Disposition', `attachment; filename="${recording.filename}"`)
     res.setHeader('Content-Length', stats.size)
 
@@ -1027,7 +946,7 @@ router.get('/:recordingId/stream', async (req, res) => {
         'Content-Range': `bytes ${start}-${end}/${fileSize}`,
         'Accept-Ranges': 'bytes',
         'Content-Length': chunksize,
-        'Content-Type': 'video/x-msvideo',
+        'Content-Type': 'video/mp4',
       }
 
       res.writeHead(206, head)
@@ -1035,7 +954,7 @@ router.get('/:recordingId/stream', async (req, res) => {
     } else {
       const head = {
         'Content-Length': fileSize,
-        'Content-Type': 'video/x-msvideo',
+        'Content-Type': 'video/mp4',
       }
       res.writeHead(200, head)
       fs.createReadStream(filePath).pipe(res)
@@ -1097,15 +1016,17 @@ router.delete('/:recordingId', async (req, res) => {
 router.get('/active', (req, res) => {
   try {
     const active = Array.from(activeRecordings.entries()).map(([recordingId, info]) => ({
-      recordingId,
+      recordingId: info.recordingId || recordingId,
       deviceId: info.deviceId,
-      startTime: info.startTime,
-      type: info.type,
-      filename: info.filename,
-      duration: info.duration
+      startTime: info.startTime instanceof Date ? info.startTime.toISOString() : info.startTime,
+      type: info.type || 'auto',
+      filename: info.filename || `Recording_${recordingId}`,
+      duration: info.duration || 0
     }))
 
     console.log(`📊 Active recordings: ${active.length}`)
+    console.log('📊 Active recording details:', active)
+
     res.json({
       activeRecordings: active,
       total: active.length
@@ -1120,237 +1041,18 @@ router.get('/active', (req, res) => {
   }
 })
 
-// Test auto-recording settings
-router.post('/auto-settings/test', async (req, res) => {
-  try {
-    const { settings } = req.body
-
-    // Validate the settings
-    const validationErrors = []
-
-    if (typeof settings.enabled !== 'boolean') {
-      validationErrors.push('enabled must be a boolean')
-    }
-
-    if (!Number.isInteger(settings.chunkDuration) || settings.chunkDuration < 1 || settings.chunkDuration > 60) {
-      validationErrors.push('chunkDuration must be between 1 and 60 minutes')
-    }
-
-    if (!['low', 'medium', 'high'].includes(settings.quality)) {
-      validationErrors.push('quality must be low, medium, or high')
-    }
-
-    if (!Number.isInteger(settings.maxStorage) || settings.maxStorage < 1) {
-      validationErrors.push('maxStorage must be a positive integer (GB)')
-    }
-
-    if (!Number.isInteger(settings.retentionPeriod) || settings.retentionPeriod < 1) {
-      validationErrors.push('retentionPeriod must be a positive integer (days)')
-    }
-
-    if (!Array.isArray(settings.enabledDevices)) {
-      validationErrors.push('enabledDevices must be an array')
-    }
-
-    if (validationErrors.length > 0) {
-      return res.status(400).json({
-        success: false,
-        errors: validationErrors
-      })
-    }
-
-    // Test if we can access the devices
-    const deviceValidation = []
-    for (const deviceId of settings.enabledDevices) {
-      if (!deviceId || typeof deviceId !== 'string') {
-        deviceValidation.push(`Invalid device ID: ${deviceId}`)
-      }
-    }
-
-    res.json({
-      success: true,
-      message: 'Auto-recording settings validated successfully',
-      warnings: deviceValidation.length > 0 ? deviceValidation : null,
-      settings: {
-        enabled: settings.enabled,
-        chunkDuration: settings.chunkDuration,
-        quality: settings.quality,
-        maxStorage: settings.maxStorage,
-        retentionPeriod: settings.retentionPeriod,
-        enabledDevices: settings.enabledDevices
-      }
-    })
-
-  } catch (error) {
-    console.error('Error testing auto-recording settings:', error)
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error while testing settings'
-    })
+// Initialize auto-recording on startup if enabled
+setTimeout(() => {
+  if (autoRecordingSettings.enabled && autoRecordingSettings.enabledDevices.length > 0) {
+    console.log('🚀 Auto-recording enabled on startup, waiting for database connection...')
+    // Will be started when database is ready
   }
-})
+}, 2000)
 
-// Start auto-recording
-router.post('/auto/start', async (req, res) => {
-  try {
-    const { deviceIds, duration, quality } = req.body
-    const dbConnection = req.app.get('dbConnection')
-
-    if (!Array.isArray(deviceIds) || deviceIds.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'deviceIds must be a non-empty array'
-      })
-    }
-
-    // Validate devices exist in database
-    const devices = []
-    for (const deviceId of deviceIds) {
-      const device = await getDeviceById(deviceId, dbConnection)
-      if (device) {
-        devices.push(device)
-      }
-    }
-
-    // Start auto-recordings using existing function
-    try {
-      startAutoRecordingsForDevices(deviceIds, dbConnection)
-
-      const startedRecordings = devices.map(device => ({
-        deviceId: device.id,
-        deviceName: device.name,
-        status: 'started'
-      }))
-
-      res.json({
-        success: true,
-        message: `Auto-recording started for ${startedRecordings.length} device(s)`,
-        started: startedRecordings,
-        format: 'MP4',
-        chunkDuration: autoRecordingSettings.chunkDuration
-      })
-
-    } catch (error) {
-      console.error('Error starting auto-recordings:', error)
-      res.status(500).json({
-        success: false,
-        error: 'Failed to start auto-recordings',
-        details: error.message
-      })
-    }
-
-  } catch (error) {
-    console.error('Error in auto-recording start endpoint:', error)
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error'
-    })
-  }
-})
-
-// Directory health check endpoint
-router.get('/health/directory', async (req, res) => {
-  try {
-    const dirStatus = await ensureRecordingsDirectory()
-
-    // Get directory stats
-    let stats = null
-    let files = []
-    let totalSize = 0
-
-    if (dirStatus.success) {
-      try {
-        const dirContents = fs.readdirSync(RECORDINGS_DIR)
-        stats = fs.statSync(RECORDINGS_DIR)
-
-        for (const file of dirContents) {
-          const filePath = path.join(RECORDINGS_DIR, file)
-          const fileStats = fs.statSync(filePath)
-          if (fileStats.isFile()) {
-            files.push(file)
-            totalSize += fileStats.size
-          }
-        }
-      } catch (err) {
-        console.warn('Warning reading directory contents:', err.message)
-      }
-    }
-
-    res.json({
-      success: dirStatus.success,
-      directory: RECORDINGS_DIR,
-      exists: fs.existsSync(RECORDINGS_DIR),
-      writable: dirStatus.success,
-      fileCount: files.length,
-      totalSize: formatFileSize(totalSize),
-      error: dirStatus.error || null,
-      recommendations: dirStatus.success ? [] : [
-        'Check directory permissions',
-        'Ensure the parent directory exists',
-        `Try manually creating: mkdir -p ${RECORDINGS_DIR}`,
-        'Check disk space availability'
-      ]
-    })
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      directory: RECORDINGS_DIR
-    })
-  }
-})
-
-// Stop auto-recording
-router.post('/auto/stop', async (req, res) => {
-  try {
-    const { deviceIds } = req.body
-    const dbConnection = req.app.get('dbConnection')
-
-    if (!Array.isArray(deviceIds) || deviceIds.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'deviceIds must be a non-empty array'
-      })
-    }
-
-    const stoppedRecordings = []
-
-    for (const deviceId of deviceIds) {
-      if (recordingTimers.has(deviceId)) {
-        clearInterval(recordingTimers.get(deviceId))
-        recordingTimers.delete(deviceId)
-        console.log(`🛑 Stopped auto-recording timer for device: ${deviceId}`)
-
-        // Stop any active recording for this device
-        const activeRecording = Array.from(activeRecordings.entries())
-          .find(([id, info]) => info.deviceId === deviceId && info.type === 'auto')
-
-        if (activeRecording) {
-          await stopRecording(activeRecording[1].recordingId, dbConnection)
-        }
-
-        stoppedRecordings.push({
-          deviceId,
-          deviceName: `Device ${deviceId}`,
-          status: 'stopped'
-        })
-      }
-    }
-
-    res.json({
-      success: true,
-      message: `Auto-recording stopped for ${stoppedRecordings.length} device(s)`,
-      stopped: stoppedRecordings
-    })
-
-  } catch (error) {
-    console.error('Error stopping auto-recordings:', error)
-    res.status(500).json({
-      success: false,
-      error: 'Failed to stop auto-recordings',
-      details: error.message
-    })
-  }
-})
-
+// Export router as default
 module.exports = router
+
+// Add functions as properties of the router
+router.startAutoRecordingsForDevices = startAutoRecordingsForDevices
+router.stopAllAutoRecordings = stopAllAutoRecordings
+router.autoRecordingSettings = autoRecordingSettings

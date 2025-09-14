@@ -1,8 +1,8 @@
 {
-  "enabled": true,
+  "enabled": false,
   "chunkDuration": 1,
   "quality": "medium",
-  "maxStorage": 1,
+  "maxStorage": 30,
   "retentionPeriod": 1,
   "enabledDevices": [
     "onvif-192-168-226-202"

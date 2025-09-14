@@ -18,6 +18,8 @@ try {
 const { DatabaseMigration } = require('./utils/database-migration');
 const { seedDatabase } = require('./utils/seed-database');
 
+const serverInitializer = require('./server-init')
+
 // Database configuration class for dual support
 class DatabaseAdapter {
   constructor() {
@@ -605,6 +607,10 @@ const startServer = async () => {
     logger.info('🔄 Initializing database schema...');
     await initializeDatabase();
 
+    // Initialize auto-recording environment
+    logger.info('🚀 Initializing auto-recording environment...')
+    await serverInitializer.initialize()
+
     // Step 4: Create Express app and HTTP server for WebRTC support
     logger.info('🌐 Setting up Express application with WebRTC support...');
     const app = express();
@@ -645,6 +651,7 @@ const startServer = async () => {
       const healthRoutes = require('./routes/health');
       const streamRoutes = require('./routes/streams');
       const recordingRoutes = require('./routes/recordings');
+      const ptzRoutes = require('./routes/ptz');
       const motionRoutes = require('./routes/motion');
       const auditRoutes = require('./routes/audit');
 
@@ -655,6 +662,7 @@ const startServer = async () => {
       app.use('/api/health', healthRoutes);
       app.use('/api/streams', streamRoutes);
       app.use('/api/recordings', recordingRoutes);
+      app.use('/api/ptz', ptzRoutes);
       app.use('/api/motion', motionRoutes);
       app.use('/api/audit', auditRoutes);
 
@@ -1007,6 +1015,15 @@ const startServer = async () => {
         logger.info(`💾 SQLite Database: ${path.join(__dirname, 'onvif_vms.db')}`);
       }
       logger.info(`🔧 Node.js: ${process.version}`);
+
+      setTimeout(async () => {
+        try {
+          logger.info('🎬 Checking auto-recording settings...')
+          await serverInitializer.startAutoRecordingsIfEnabled(dbAdapter)
+        } catch (error) {
+          logger.error('❌ Failed to initialize auto-recordings:', error)
+        }
+      }, 8000) // Wait 8 seconds for server to be fully ready
 
       console.log('\n🎯 ONVIF Video Management System is ready!');
       console.log('┌────────────────────────────────────────────────┐');

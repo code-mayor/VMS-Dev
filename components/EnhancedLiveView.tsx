@@ -6,6 +6,7 @@ import { Alert, AlertDescription } from './ui/alert'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog'
 import { useStreamState } from './StreamStateManager'
 import { HLSPlayer } from './HLSPlayer'
+import { PTZOverlay } from './PTZOverlay'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { toast } from 'sonner'
 import {
@@ -35,7 +36,8 @@ import {
   SkipForward,
   Rewind,
   Save,
-  Folder
+  Folder,
+  Move
 } from 'lucide-react'
 
 interface Device {
@@ -46,6 +48,9 @@ interface Device {
   model?: string
   authenticated: boolean
   status: string
+  capabilities?: {
+    ptz?: boolean
+  } | string
 }
 
 interface EnhancedLiveViewProps {
@@ -76,6 +81,10 @@ interface Screenshot {
 export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRefreshDevices }: EnhancedLiveViewProps) {
   const [gridLayout, setGridLayout] = useState<'1x1' | '2x2' | '3x3' | '4x4'>('2x2')
   const [expandedDevice, setExpandedDevice] = useState<string | null>(null)
+
+  // Add PTZ control states
+  const [showPTZControls, setShowPTZControls] = useState<Record<string, boolean>>({})
+  const [expandedPTZ, setExpandedPTZ] = useState<Record<string, boolean>>({})
 
   // Add null check for context
   let streamContext = null;
@@ -214,7 +223,7 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
         recording: false
       })
 
-    } catch (err) {
+    } catch (err: any) {
       console.error(`Failed to start stream for ${device.name}:`, err)
       setStreamState(device.id, {
         deviceId: device.id,
@@ -433,45 +442,6 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
     await Promise.all(startPromises)
   }
 
-  // Auto-start streams for visible devices
-  // useEffect(() => {
-  //   // Add a delay to ensure component is fully mounted
-  //   const startupDelay = setTimeout(() => {
-  //     const initializeStreams = async () => {
-  //       const visibleDevices = authenticatedDevices.slice(0, getGridSize())
-
-  //       if (visibleDevices.length === 0) {
-  //         console.log('No authenticated devices to initialize')
-  //         return
-  //       }
-
-  //       console.log(`Initializing ${visibleDevices.length} streams...`)
-
-  //       for (const device of visibleDevices) {
-  //         const currentState = streamStates.get(device.id)
-
-  //         // Only start if not already started
-  //         if (!currentState || currentState.status === 'stopped') {
-  //           console.log(`Auto-starting stream for ${device.name}`)
-  //           try {
-  //             await startStream(device)
-  //             // Give FFmpeg time to initialize
-  //             await new Promise(resolve => setTimeout(resolve, 2000))
-  //           } catch (error) {
-  //             console.error(`Failed to auto-start ${device.name}:`, error)
-  //           }
-  //         }
-  //       }
-  //     }
-
-  //     initializeStreams()
-  //   }, 1000) // 1 second delay for component mount
-
-  //   return () => {
-  //     clearTimeout(startupDelay)
-  //   }
-  // }, [gridLayout, authenticatedDevices.length])
-
   // Auto-start streams with proper delay and sequencing
   useEffect(() => {
     if (authenticatedDevices.length === 0) return
@@ -552,7 +522,6 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
     return () => clearInterval(interval)
   }, [streamStates])
 
-  // Cleanup all streams on unmount - but only if actually unmounting
   // Don't cleanup streams on unmount - they persist globally
   useEffect(() => {
     return () => {
@@ -564,6 +533,19 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
   const renderStreamTile = (device: Device, index: number) => {
     const streamState = streamStates.get(device.id)
     const isExpanded = expandedDevice === device.id
+
+    // Check if device has PTZ capability
+    const hasPTZ = (() => {
+      if (typeof device?.capabilities === 'string') {
+        try {
+          const caps = JSON.parse(device.capabilities)
+          return caps.ptz === true
+        } catch {
+          return false
+        }
+      }
+      return device?.capabilities?.ptz === true
+    })()
 
     return (
       <Card key={device.id} className={`relative overflow-hidden ${isExpanded ? 'col-span-2 row-span-2' : ''}`} data-device-id={device.id}>
@@ -635,6 +617,22 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
             </div>
           )}
 
+          {/* PTZ Overlay - shows when activated */}
+          {hasPTZ && showPTZControls[device.id] && (
+            <PTZOverlay
+              device={device}
+              position="bottom-right"
+              expanded={expandedPTZ[device.id] || false}
+              onToggleExpand={() =>
+                setExpandedPTZ({ ...expandedPTZ, [device.id]: !expandedPTZ[device.id] })
+              }
+              onClose={() => {
+                setShowPTZControls({ ...showPTZControls, [device.id]: false })
+                setExpandedPTZ({ ...expandedPTZ, [device.id]: false })
+              }}
+            />
+          )}
+
           {/* Stream Overlay */}
           <div className="absolute top-0 left-0 right-0 bg-gradient-to-b from-black/60 to-transparent p-3">
             <div className="flex items-center justify-between">
@@ -643,6 +641,12 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
                 <p className="text-white/80 text-xs">{device.ip_address}</p>
               </div>
               <div className="flex items-center space-x-1">
+                {hasPTZ && (
+                  <Badge variant="outline" className="text-xs bg-blue-600/20 border-blue-400/50 text-blue-300">
+                    <Move className="w-3 h-3 mr-1" />
+                    PTZ
+                  </Badge>
+                )}
                 {streamState?.recording && (
                   <div className="flex items-center space-x-1 bg-red-600 px-2 py-1 rounded text-xs text-white">
                     <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
@@ -667,6 +671,22 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
           <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-3" style={{ pointerEvents: 'auto', zIndex: 10 }}>
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
+                {/* PTZ Control Button - shows when device has PTZ capability */}
+                {hasPTZ && !showPTZControls[device.id] && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setShowPTZControls({ ...showPTZControls, [device.id]: true })
+                    }}
+                    className="bg-blue-600/50 hover:bg-blue-600/70 text-white border-blue-400/20"
+                    title="PTZ Controls"
+                  >
+                    <Move className="w-3 h-3" />
+                  </Button>
+                )}
+
                 <Button
                   size="sm"
                   variant="secondary"

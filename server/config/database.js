@@ -1,3 +1,5 @@
+// /server/config/database.js
+
 const mysql = require('mysql2/promise');
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
@@ -12,9 +14,13 @@ class DatabaseConnection {
 
     async connect() {
         if (this.dbType === 'mysql') {
-            return this.connectMySQL();
+            const conn = await this.connectMySQL();
+            await this.ensureSchemaMySQL(conn);
+            return conn;
         } else {
-            return this.connectSQLite();
+            const db = await this.connectSQLite();
+            await this.ensureSchemaSQLite(db);
+            return db;
         }
     }
 
@@ -55,6 +61,54 @@ class DatabaseConnection {
                 }
             });
         });
+    }
+
+    // Ensure schema for MySQL
+    async ensureSchemaMySQL(conn) {
+        try {
+            const [rows] = await conn.query(`
+                SHOW COLUMNS FROM devices LIKE 'profile_token'
+            `);
+
+            if (rows.length === 0) {
+                await conn.query(`
+                    ALTER TABLE devices 
+                    ADD COLUMN profile_token VARCHAR(255) NULL
+                `);
+                logger.info("🛠️ Added missing column 'profile_token' to devices table (MySQL).");
+            } else {
+                logger.info("✅ Column 'profile_token' exists in devices table (MySQL).");
+            }
+        } catch (err) {
+            logger.error("❌ Failed ensuring schema in MySQL:", err.message);
+        }
+    }
+
+    // Ensure schema for SQLite
+    async ensureSchemaSQLite(db) {
+        try {
+            const result = await new Promise((resolve, reject) => {
+                db.all(`PRAGMA table_info(devices);`, (err, rows) => {
+                    if (err) reject(err);
+                    else resolve(rows);
+                });
+            });
+
+            const hasProfileToken = result.some(r => r.name === 'profile_token');
+            if (!hasProfileToken) {
+                await new Promise((resolve, reject) => {
+                    db.run(`ALTER TABLE devices ADD COLUMN profile_token TEXT;`, (err) => {
+                        if (err) reject(err);
+                        else resolve();
+                    });
+                });
+                logger.info("🛠️ Added missing column 'profile_token' to devices table (SQLite).");
+            } else {
+                logger.info("✅ Column 'profile_token' exists in devices table (SQLite).");
+            }
+        } catch (err) {
+            logger.error("❌ Failed ensuring schema in SQLite:", err.message);
+        }
     }
 
     async query(sql, params = []) {

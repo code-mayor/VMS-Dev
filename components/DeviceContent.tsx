@@ -138,10 +138,9 @@ export function DeviceContent({
         <div className="w-full max-w-none px-4 sm:px-6 lg:px-8 py-6">
           {selectedDevice ? (
             <PTZControls
+              device={selectedDevice}  // ← ADD THIS LINE - Pass the full device object
               deviceId={selectedDevice.id}
               deviceName={selectedDevice.name}
-              ptzPresets={selectedDevice.ptz_presets || {}}
-              onPTZCommand={(command, params) => deviceOperations.handlePTZCommand(selectedDevice.id, command, params)}
               disabled={!hasPermission('devices', 'ptz')}
             />
           ) : (

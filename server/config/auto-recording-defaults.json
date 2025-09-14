@@ -1,0 +1,46 @@
+{
+  "defaults": {
+    "enabled": false,
+    "chunkDuration": 1,
+    "quality": "medium",
+    "maxStorage": 30,
+    "retentionPeriod": 1,
+    "enabledDevices": []
+  },
+  "constraints": {
+    "chunkDuration": {
+      "min": 1,
+      "max": 60,
+      "unit": "minutes"
+    },
+    "quality": {
+      "options": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "maxStorage": {
+      "min": 1,
+      "max": 10000,
+      "unit": "GB"
+    },
+    "retentionPeriod": {
+      "min": 1,
+      "max": 365,
+      "unit": "days"
+    }
+  },
+  "performance": {
+    "maxConcurrentRecordings": 100,
+    "batchSize": 50,
+    "healthCheckInterval": 30000,
+    "retryAttempts": 3,
+    "retryDelay": 5000
+  },
+  "storage": {
+    "baseDirectory": "/public/recordings",
+    "fileNamePattern": "${type}_${deviceId}_${timestamp}.mp4",
+    "cleanupInterval": 3600000
+  }
+}
