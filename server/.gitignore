@@ -1,1 +1,8 @@
-.env
+# Node / server
+node_modules/
+dist/
+build/
+.next/
+
+# Public
+public/git
