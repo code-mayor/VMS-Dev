@@ -231,45 +231,41 @@ class HLSStreamingService {
 
     // Robust transcoding that handles timing issues and audio
     return [
+      // '-y',                        // Overwrite output files
+      // '-rtsp_transport', 'tcp',    // Use TCP for RTSP
+      // '-timeout', '10000000',      // 10 second timeout to prevent hanging
+      // '-fflags', '+genpts+discardcorrupt',  // Generate proper timestamps
+      // '-use_wallclock_as_timestamps', '1',   // Use wall clock for timestamps
+      // '-i', rtspUrl,              // Input URL
+      // // '-c', 'copy',               // Copy codecs (NO transcoding) - KEY FIX!
+      // '-c:v', 'copy',                        // Copy video codec
+      // '-c:a', 'copy',                        // Copy audio codec
+      // '-copyts',                              // Copy timestamps
+      // '-start_at_zero',                       // Start timestamps at zero
+      // '-vsync', '0',                          // Passthrough timestamps
+      // '-f', 'hls',                // HLS format
+      // '-hls_time', '2',           // 2-second segments (matching HLSPlayer expectations)
+      // '-hls_list_size', '10',      // Keep 10 segments (20 seconds)
+      // '-hls_flags', 'delete_segments+append_list', // Better segment management
+      // '-hls_segment_filename', segmentPattern,
+      // '-hls_allow_cache', '0',    // Don't cache
+      // '-hls_segment_type', 'mpegts', // Explicit segment type
+      // '-hls_start_number_source', 'datetime', // Better numbering
+      // '-hls_delete_threshold', '1', // Delete old segments quickly
+      // playlistPath
+
       '-y',
       '-rtsp_transport', 'tcp',
-      '-fflags', '+genpts+discardcorrupt+igndts',
-      '-use_wallclock_as_timestamps', '1',
-      '-analyzeduration', '5000000',
-      '-probesize', '5000000',
-      '-max_delay', '5000000',
       '-i', rtspUrl,
-      // Video transcoding with frame rate control
-      '-c:v', 'libx264',
-      '-preset', 'ultrafast',
-      '-tune', 'zerolatency',
-      '-profile:v', 'baseline',
-      '-level', '3.0',
-      '-b:v', '1000k',
-      '-maxrate', '1500k',
-      '-bufsize', '2000k',
-      '-pix_fmt', 'yuv420p',
-      '-g', '30',
-      // Fix frame duplication with vsync
-      '-vsync', '1',  // Duplicate frames when needed for constant frame rate
-      '-r', '25',     // Force output to 25fps
-      // Audio - handle pcm_alaw
-      // '-c:a', 'aac',
-      // '-b:a', '64k',
-      // '-ar', '22050',
-      // '-ac', '1',
-      '-an',  // No audio
-      // Map streams with optional audio
-      '-map', '0:v:0',
-      '-map', '0:a:0?',
-      // HLS output
+      '-c:v', 'copy',           // Copy video codec
+      '-c:a', 'copy',           // Copy audio codec  
       '-f', 'hls',
-      '-hls_time', '4',
-      '-hls_list_size', '10',
-      '-hls_flags', 'delete_segments+program_date_time+second_level_segment_index',
+      '-hls_time', '2',         // 2-second segments
+      '-hls_list_size', '6',    // Keep 6 segments in playlist
+      '-hls_flags', 'delete_segments+independent_segments', // Clean segment management
       '-hls_segment_filename', segmentPattern,
       '-hls_segment_type', 'mpegts',
-      '-start_number', '0',
+      '-hls_allow_cache', '0',
       playlistPath
     ];
   }
@@ -277,31 +273,56 @@ class HLSStreamingService {
   /**
    * Start HLS streaming using the working copy-based approach
    */
+  /**
+ * Start HLS streaming using the working copy-based approach
+ */
   async startStreaming(device) {
     try {
       // Ensure consistent stream ID format
-      const streamId = device.id.includes('_hls')
-        ? device.id
-        : `${device.id}_hls`;
+      const deviceIdForStream = device.id.replace(/\./g, '-');
+      const streamId = deviceIdForStream.includes('_hls')
+        ? deviceIdForStream
+        : `${deviceIdForStream}_hls`;
 
-      // Clean up any existing stream directory first
+      // CRITICAL: Clean up any existing stream directory first
       const streamDir = path.join(this.hlsOutputDir, streamId);
+
+      // Force complete cleanup of old segments
       if (fs.existsSync(streamDir)) {
-        logger.info(`🧹 Cleaning up existing stream directory for fresh start: ${streamDir}`);
+        logger.info(`🧹 Force cleaning stream directory: ${streamDir}`);
         try {
-          this.cleanupStreamDirectory(streamDir);
-          // Wait a moment for filesystem operations
-          await new Promise(resolve => setTimeout(resolve, 500));
+          // Delete all .ts and .m3u8 files
+          const files = fs.readdirSync(streamDir);
+          files.forEach(file => {
+            const filePath = path.join(streamDir, file);
+            try {
+              fs.unlinkSync(filePath);
+              logger.info(`🗑️ Deleted: ${file}`);
+            } catch (e) {
+              logger.warn(`Failed to delete ${file}: ${e.message}`);
+            }
+          });
+
+          // Remove and recreate the directory
+          fs.rmdirSync(streamDir);
+          await new Promise(resolve => setTimeout(resolve, 100));
         } catch (cleanupError) {
-          logger.warn(`⚠️ Failed to cleanup existing directory: ${cleanupError.message}`);
+          logger.warn(`⚠️ Cleanup error: ${cleanupError.message}`);
         }
       }
 
+      // Stop any existing stream for this device
       if (this.activeStreams.has(streamId)) {
         logger.info(`🎥 HLS stream already active for ${device.name}, stopping first for clean restart`);
         await this.stopStreaming(streamId);
         // Wait for complete cleanup
         await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+
+      // Create fresh directory
+      if (!fs.existsSync(streamDir)) {
+        fs.mkdirSync(streamDir, { recursive: true, mode: 0o755 });
+        logger.info(`📁 Created fresh stream directory: ${streamDir}`);
       }
 
       logger.info(`🚀 Starting fresh HLS stream for ${device.name} at ${device.ip_address}`);
@@ -316,17 +337,11 @@ class HLSStreamingService {
       const maskedUrl = rtspUrl.replace(/\/\/.*:.*@/, '//***:***@');
       logger.info(`📡 Using validated RTSP URL: ${maskedUrl}`);
 
-      // Create fresh HLS output directory for this stream 
-      if (!fs.existsSync(streamDir)) {
-        fs.mkdirSync(streamDir, { recursive: true, mode: 0o755 });
-        logger.info(`📁 Created fresh stream directory: ${streamDir}`);
-      }
-
       // Build the working command (matches manual test exactly)
       const ffmpegArgs = this.buildWorkingFFmpegCommand(rtspUrl, streamDir);
       const playlistPath = path.join(streamDir, 'playlist.m3u8');
 
-      logger.info('🔧 Starting FFmpeg with transcoding (H.264/AAC output)');
+      logger.info('🔧 Starting FFmpeg with copy codec approach');
       logger.info(`📝 FFmpeg command: ffmpeg ${ffmpegArgs.join(' ').replace(rtspUrl, maskedUrl)}`);
 
       // Critical fix: Proper process execution with explicit options to prevent hanging
@@ -381,7 +396,7 @@ class HLSStreamingService {
       });
 
       ffmpegProcess.on('close', (code) => {
-        logger.info(`🏁 FFmpeg process ended for ${device.name} with code ${code}`);
+        logger.info(`🛑 FFmpeg process ended for ${device.name} with code ${code}`);
         this.activeStreams.delete(streamId);
 
         // Clean up stream directory only if it failed badly
@@ -450,11 +465,113 @@ class HLSStreamingService {
   /**
    * Wait for HLS playlist with enhanced process monitoring
    */
+  // async waitForPlaylistWithProcessMonitoring(playlistPath, ffmpegProcess, timeoutMs = 30000) {
+  //   return new Promise((resolve, reject) => {
+  //     const startTime = Date.now();
+  //     let segmentCount = 0;
+  //     let segmentsSeen = 0;
+
+  //     const checkPlaylist = () => {
+  //       try {
+  //         // Check if FFmpeg process is still running
+  //         if (ffmpegProcess.killed || ffmpegProcess.exitCode !== null) {
+  //           reject(new Error(`FFmpeg process ended unexpectedly (code: ${ffmpegProcess.exitCode})`));
+  //           return;
+  //         }
+
+  //         // Check for playlist file
+  //         if (fs.existsSync(playlistPath)) {
+  //           const content = fs.readFileSync(playlistPath, 'utf8');
+
+  //           // Check for valid playlist content
+  //           if (content.includes('#EXTM3U')) {
+  //             // Count segments in playlist
+  //             const segments = content.split('\n').filter(line => line.endsWith('.ts'));
+  //             segmentCount = segments.length;
+
+  //             if (segmentCount >= 2) {
+  //               logger.info(`📺 HLS playlist ready with ${segmentCount} segment(s)`);
+  //               // Show created files
+  //               try {
+  //                 const streamDir = path.dirname(playlistPath);
+  //                 const files = fs.readdirSync(streamDir);
+  //                 logger.info(`📁 Created files: ${files.join(', ')}`);
+  //               } catch (e) {
+  //                 // Ignore file listing errors
+  //               }
+  //               resolve();
+  //               return;
+  //             }
+  //           }
+  //         }
+
+  //         // Check for segment files even if playlist isn't ready yet
+  //         try {
+  //           const streamDir = path.dirname(playlistPath);
+  //           if (fs.existsSync(streamDir)) {
+  //             const files = fs.readdirSync(streamDir);
+  //             const tsFiles = files.filter(f => f.endsWith('.ts'));
+  //             if (tsFiles.length > segmentsSeen) {
+  //               segmentsSeen = tsFiles.length;
+  //               logger.info(`🎬 Found ${tsFiles.length} segment files: ${tsFiles.join(', ')}`);
+  //             }
+  //           }
+  //         } catch (e) {
+  //           // Directory might not exist yet
+  //         }
+
+  //         const elapsed = Date.now() - startTime;
+  //         if (elapsed >= timeoutMs) {
+  //           // Show FFmpeg report if available for debugging
+  //           try {
+  //             if (fs.existsSync('/tmp/ffmpeg-report.log')) {
+  //               const report = fs.readFileSync('/tmp/ffmpeg-report.log', 'utf8');
+  //               logger.info(`📋 FFmpeg report (last 500 chars): ${report.slice(-500)}`);
+  //             }
+  //           } catch (e) {
+  //             // Ignore report read errors
+  //           }
+
+  //           reject(new Error(`Timeout waiting for HLS playlist after ${Math.round(elapsed / 1000)}s. Segments seen: ${segmentsSeen}`));
+  //           return;
+  //         }
+
+  //         // Log progress every 2 seconds with more detail
+  //         if (elapsed % 2000 < 500) {
+  //           logger.info(`⏳ Still waiting for HLS playlist... ${Math.round(elapsed / 1000)}s elapsed (segments: ${segmentsSeen})`);
+
+  //           // Show current directory contents for debugging
+  //           try {
+  //             const streamDir = path.dirname(playlistPath);
+  //             if (fs.existsSync(streamDir)) {
+  //               const files = fs.readdirSync(streamDir);
+  //               if (files.length > 0) {
+  //                 logger.info(`📁 Current files: ${files.join(', ')}`);
+  //               } else {
+  //                 logger.info(`📁 Directory is empty`);
+  //               }
+  //             }
+  //           } catch (e) {
+  //             logger.info(`📁 Cannot read directory: ${e.message}`);
+  //           }
+  //         }
+
+  //         setTimeout(checkPlaylist, 500); // Check every 500ms
+
+  //       } catch (error) {
+  //         reject(new Error(`Failed to check HLS playlist: ${error.message}`));
+  //       }
+  //     };
+
+  //     checkPlaylist();
+  //   });
+  // }
+
   async waitForPlaylistWithProcessMonitoring(playlistPath, ffmpegProcess, timeoutMs = 30000) {
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
       let segmentCount = 0;
-      let segmentsSeen = 0;
+      let playlistFound = false;
 
       const checkPlaylist = () => {
         try {
@@ -470,78 +587,26 @@ class HLSStreamingService {
 
             // Check for valid playlist content
             if (content.includes('#EXTM3U')) {
-              // Count segments in playlist
               const segments = content.split('\n').filter(line => line.endsWith('.ts'));
               segmentCount = segments.length;
 
-              if (segmentCount >= 2) {
+              // Wait for at least 1 segment instead of 2
+              if (segmentCount >= 1) {
                 logger.info(`📺 HLS playlist ready with ${segmentCount} segment(s)`);
-                // Show created files
-                try {
-                  const streamDir = path.dirname(playlistPath);
-                  const files = fs.readdirSync(streamDir);
-                  logger.info(`📁 Created files: ${files.join(', ')}`);
-                } catch (e) {
-                  // Ignore file listing errors
-                }
                 resolve();
                 return;
               }
             }
           }
 
-          // Check for segment files even if playlist isn't ready yet
-          try {
-            const streamDir = path.dirname(playlistPath);
-            if (fs.existsSync(streamDir)) {
-              const files = fs.readdirSync(streamDir);
-              const tsFiles = files.filter(f => f.endsWith('.ts'));
-              if (tsFiles.length > segmentsSeen) {
-                segmentsSeen = tsFiles.length;
-                logger.info(`🎬 Found ${tsFiles.length} segment files: ${tsFiles.join(', ')}`);
-              }
-            }
-          } catch (e) {
-            // Directory might not exist yet
-          }
-
           const elapsed = Date.now() - startTime;
           if (elapsed >= timeoutMs) {
-            // Show FFmpeg report if available for debugging
-            try {
-              if (fs.existsSync('/tmp/ffmpeg-report.log')) {
-                const report = fs.readFileSync('/tmp/ffmpeg-report.log', 'utf8');
-                logger.info(`📋 FFmpeg report (last 500 chars): ${report.slice(-500)}`);
-              }
-            } catch (e) {
-              // Ignore report read errors
-            }
-
-            reject(new Error(`Timeout waiting for HLS playlist after ${Math.round(elapsed / 1000)}s. Segments seen: ${segmentsSeen}`));
+            reject(new Error(`Timeout waiting for HLS playlist after ${Math.round(elapsed / 1000)}s`));
             return;
           }
 
-          // Log progress every 2 seconds with more detail
-          if (elapsed % 2000 < 500) {
-            logger.info(`⏳ Still waiting for HLS playlist... ${Math.round(elapsed / 1000)}s elapsed (segments: ${segmentsSeen})`);
-
-            // Show current directory contents for debugging
-            try {
-              const streamDir = path.dirname(playlistPath);
-              if (fs.existsSync(streamDir)) {
-                const files = fs.readdirSync(streamDir);
-                if (files.length > 0) {
-                  logger.info(`📁 Current files: ${files.join(', ')}`);
-                } else {
-                  logger.info(`📁 Directory is empty`);
-                }
-              }
-            } catch (e) {
-              logger.info(`📁 Cannot read directory: ${e.message}`);
-            }
-          }
-
-          setTimeout(checkPlaylist, 500); // Check every 500ms
+          // Check every 250ms instead of 500ms for faster response
+          setTimeout(checkPlaylist, 250);
 
         } catch (error) {
           reject(new Error(`Failed to check HLS playlist: ${error.message}`));

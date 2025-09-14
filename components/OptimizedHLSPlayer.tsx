@@ -2,12 +2,12 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { Progress } from './ui/progress'
-import { 
-  Play, 
-  Pause, 
-  Volume2, 
-  VolumeX, 
-  Maximize, 
+import {
+  Play,
+  Pause,
+  Volume2,
+  VolumeX,
+  Maximize,
   AlertTriangle,
   Wifi,
   WifiOff,
@@ -115,69 +115,69 @@ export function OptimizedHLSPlayer({
       // Check if HLS.js is available
       if (typeof window !== 'undefined' && (window as any).Hls) {
         const Hls = (window as any).Hls
-        
+
         if (Hls.isSupported()) {
           console.log('🎥 Using HLS.js for optimized live streaming')
-          
+
           const hls = new Hls({
             // IMPROVED HLS.js configuration for smoother playback
             enableWorker: true,
             lowLatencyMode: isLive,
-            
+
             // Buffer settings optimized for smoothness vs latency (4-second chunks as requested)
             backBufferLength: isLive ? 8 : 30, // 4-second chunks x 2 for smoother playback
             maxBufferLength: isLive ? 16 : 30, // 4-second chunks x 4 for stability
             maxMaxBufferLength: isLive ? 24 : 60, // 4-second chunks x 6 for edge cases
             maxBufferSize: isLive ? 16 * 1000 * 1000 : 60 * 1000 * 1000, // 16MB for live streams (4-sec chunks)
             maxBufferHole: 1.0, // Increased tolerance for 4-second chunks
-            
+
             // Buffer watchdog settings for stability
             highBufferWatchdogPeriod: 3, // Less aggressive buffer management
             nudgeOffset: 0.2, // Larger nudge for smoother seeking
             nudgeMaxRetry: 8, // More retry attempts
-            
+
             // Live streaming optimizations (4-second chunks)
             liveSyncDurationCount: isLive ? 2 : 3, // 2 x 4-second segments = 8 seconds sync
             liveMaxLatencyDurationCount: isLive ? 4 : 10, // 4 x 4-second = 16 seconds max latency
             liveDurationInfinity: true,
-            
+
             // ABR (Adaptive Bitrate) settings for stability
             abrEwmaFastLive: isLive ? 3 : 5, // Slower adaptation for stability
             abrEwmaSlowLive: isLive ? 10 : 20, // Much slower long-term adaptation
             abrMaxWithRealBitrate: true,
             abrBandWidthFactor: 0.8, // Conservative bandwidth estimation
             abrBandWidthUpFactor: 0.7, // Even more conservative for upgrades
-            
+
             // Frame dropping and starvation prevention
             stretchShortVideoTrack: true,
             maxStarvationDelay: isLive ? 4 : 4, // Allow more time before considering starvation
             maxLoadingDelay: isLive ? 4 : 4,
-            
+
             // Network recovery optimization
             levelLoadingTimeOut: 10000, // Longer timeout for level loading
             levelLoadingMaxRetry: 4,
             levelLoadingRetryDelay: 1000,
-            
+
             // Fragment loading optimization
             fragLoadingTimeOut: 15000, // Increased timeout for stability
             fragLoadingMaxRetry: 6, // More retries
             fragLoadingRetryDelay: 1500,
-            
+
             // Manifest loading optimization  
             manifestLoadingTimeOut: 15000,
             manifestLoadingMaxRetry: 6,
             manifestLoadingRetryDelay: 1500,
-            
+
             // Additional stability settings for 4-second chunks
             startFragPrefetch: true,
             testBandwidth: false, // Skip initial bandwidth test for faster startup
             capLevelToPlayerSize: false, // Don't limit quality to player size
-            
+
             // Prevent "Too many packets buffered" error
             appendErrorMaxRetry: 3,
             loaderMaxRetry: 2,
             fragLoadingRetryMaxCount: 6, // More retries for 4-second chunks
-            
+
             debug: false
           })
 
@@ -195,7 +195,7 @@ export function OptimizedHLSPlayer({
             setConnectionStatus('connected')
             setIsLoading(false)
             onLoadEnd?.()
-            
+
             if (autoPlay && !userPaused) {
               video.play().catch(e => {
                 console.warn('🎥 Autoplay failed, user interaction required')
@@ -247,7 +247,7 @@ export function OptimizedHLSPlayer({
           hlsRef.current = hls
           hls.loadSource(src)
           hls.attachMedia(video)
-          
+
         } else {
           throw new Error('HLS.js not supported in this browser')
         }
@@ -260,7 +260,7 @@ export function OptimizedHLSPlayer({
           setConnectionStatus('connected')
           setIsLoading(false)
           onLoadEnd?.()
-          
+
           if (autoPlay && !userPaused) {
             video.play().catch(e => {
               console.warn('🎥 Autoplay failed')
@@ -282,7 +282,7 @@ export function OptimizedHLSPlayer({
       setConnectionStatus('error')
       setIsLoading(false)
       onError?.(error.message)
-      
+
       // Auto-retry for certain errors
       if (retryCount < 3 && (
         error.message.includes('not accessible') ||
@@ -332,9 +332,9 @@ export function OptimizedHLSPlayer({
 
   const handleHLSError = (data: any) => {
     const { type, details, fatal } = data
-    
+
     console.error('🎥 HLS Error Details:', { type, details, fatal })
-    
+
     if (fatal) {
       switch (type) {
         case 'networkError':
@@ -352,14 +352,14 @@ export function OptimizedHLSPlayer({
             setConnectionStatus('error')
           }
           break
-          
+
         case 'mediaError':
           console.error('🎥 Media error, attempting recovery...')
           if (hlsRef.current) {
             hlsRef.current.recoverMediaError()
           }
           break
-          
+
         default:
           setError(`Streaming error: ${details}`)
           setConnectionStatus('error')
@@ -373,18 +373,18 @@ export function OptimizedHLSPlayer({
   const monitorLiveStatus = () => {
     const video = videoRef.current
     const hls = hlsRef.current
-    
+
     if (!video || !hls || !isLive) return
 
     try {
       const currentTime = video.currentTime
       const duration = video.duration
-      
+
       if (duration && currentTime) {
         const behindLive = Math.max(0, duration - currentTime)
         const bufferEnd = video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1) : 0
         const bufferHealth = Math.min(100, Math.max(0, ((bufferEnd - currentTime) / 6) * 100)) // Based on 6-second buffer
-        
+
         setLiveStatus(prev => ({
           ...prev,
           isLive: behindLive < 6, // Consider live if less than 6 seconds behind
@@ -397,11 +397,11 @@ export function OptimizedHLSPlayer({
           console.log('🎥 Auto-skipping to live edge, behind by:', behindLive)
           skipToLive()
         }
-        
+
         // Only show loading indicator if paused for 8+ seconds (as requested)
-        const shouldShowLoading = video.paused || video.waiting || (behindLive > 8 && !userPaused)
+        const shouldShowLoading = video.paused || Boolean(video.onwaiting) || (behindLive > 8 && !userPaused)
         if (shouldShowLoading !== isLoading) {
-          setIsLoading(shouldShowLoading)
+          setIsLoading(!!shouldShowLoading)
         }
       }
     } catch (error) {
@@ -416,7 +416,7 @@ export function OptimizedHLSPlayer({
     const bufferEnd = video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1) : 0
     const currentTime = video.currentTime
     const bufferHealth = Math.min(100, Math.max(0, ((bufferEnd - currentTime) / 6) * 100))
-    
+
     setLiveStatus(prev => ({
       ...prev,
       bufferHealth
@@ -426,12 +426,12 @@ export function OptimizedHLSPlayer({
   const skipToLive = () => {
     const video = videoRef.current
     const hls = hlsRef.current
-    
+
     if (!video || !hls || !isLive) return
 
     try {
       console.log('🎥 Skipping to live edge')
-      
+
       // Get the live edge time
       const liveSyncPosition = hls.liveSyncPosition
       if (liveSyncPosition !== null && liveSyncPosition > 0) {
@@ -443,9 +443,9 @@ export function OptimizedHLSPlayer({
           video.currentTime = bufferEnd - 1 // 1 second offset from end for stability
         }
       }
-      
+
       setLiveStatus(prev => ({ ...prev, isLive: true, behindLive: 0 }))
-      
+
     } catch (error) {
       console.error('🎥 Skip to live failed:', error)
     }
@@ -546,14 +546,14 @@ export function OptimizedHLSPlayer({
       {/* Status Bar */}
       <div className="absolute top-2 left-2 right-2 z-20 flex items-center justify-between">
         <div className="flex items-center space-x-2">
-          <Badge 
+          <Badge
             variant={connectionStatus === 'connected' && liveStatus.isLive ? 'destructive' : 'secondary'}
             className="text-xs flex items-center space-x-1"
           >
             {getConnectionIcon()}
             <span>{getConnectionText()}</span>
           </Badge>
-          
+
           <Badge variant="outline" className="text-xs bg-black/50 text-white border-white/30">
             {deviceName}
           </Badge>
@@ -621,9 +621,9 @@ export function OptimizedHLSPlayer({
         {/* Buffer Health Indicator */}
         {isLive && connectionStatus === 'connected' && (
           <div className="mb-2">
-            <Progress 
-              value={liveStatus.bufferHealth} 
-              className="h-1 bg-white/20" 
+            <Progress
+              value={liveStatus.bufferHealth}
+              className="h-1 bg-white/20"
             />
           </div>
         )}

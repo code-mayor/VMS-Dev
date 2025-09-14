@@ -48,66 +48,6 @@ function getDeviceStatus(device: any, healthData: any) {
     }
   }
 
-  // For authenticated devices with 'discovered', 'online', or 'authenticated' status, show as online
-  // This is the primary check for authenticated devices
-  if (device.authenticated && (device.status === 'discovered' || device.status === 'online' || device.status === 'authenticated')) {
-    return {
-      status: 'online',
-      label: 'Online',
-      variant: 'default' as const,
-      icon: Wifi,
-      color: 'text-green-500'
-    }
-  }
-
-  // Check offline status only after checking for online status
-  if (device.status === 'offline' || device.status === 'error') {
-    // But if health check says it's healthy or still checking, trust that over the offline status
-    if (healthData.health === 'checking' ||
-      healthData.health === 'unknown' ||
-      healthData.health === 'healthy' ||
-      healthData.network === 'reachable') {
-      // For authenticated devices with conflicting health status, show as online
-      return {
-        status: 'online',
-        label: 'Online',
-        variant: 'default' as const,
-        icon: Wifi,
-        color: 'text-green-500'
-      }
-    }
-    // Only show offline if both database status and health check confirm it
-    return {
-      status: 'offline',
-      label: 'Offline',
-      variant: 'destructive' as const,
-      icon: WifiOff,
-      color: 'text-red-500'
-    }
-  }
-
-  // If health check explicitly says it's healthy
-  if (healthData.health === 'healthy' || healthData.network === 'reachable') {
-    return {
-      status: 'online',
-      label: 'Online',
-      variant: 'default' as const,
-      icon: Wifi,
-      color: 'text-green-500'
-    }
-  }
-
-  // If health check says degraded
-  if (healthData.health === 'degraded') {
-    return {
-      status: 'degraded',
-      label: 'Degraded',
-      variant: 'secondary' as const,
-      icon: AlertCircle,
-      color: 'text-yellow-500'
-    }
-  }
-
   // If health check is still running
   if (healthData.health === 'checking') {
     return {
@@ -120,15 +60,52 @@ function getDeviceStatus(device: any, healthData: any) {
     }
   }
 
-  // Default for authenticated devices is online
-  // (they wouldn't be authenticated if they weren't reachable)
-  if (device.authenticated) {
+  // Determine final status based on both device.status and health check
+  const isOnline = (
+    device.status === 'discovered' ||
+    device.status === 'online' ||
+    healthData.health === 'healthy'
+  )
+
+  const isOffline = (
+    device.status === 'offline' ||
+    device.status === 'error' ||
+    healthData.health === 'offline'
+  )
+
+  const isDegraded = (
+    !isOnline &&
+    !isOffline &&
+    healthData.health === 'degraded'
+  )
+
+  if (isOnline) {
     return {
       status: 'online',
       label: 'Online',
       variant: 'default' as const,
       icon: Wifi,
       color: 'text-green-500'
+    }
+  }
+
+  if (isOffline) {
+    return {
+      status: 'offline',
+      label: 'Offline',
+      variant: 'destructive' as const,
+      icon: WifiOff,
+      color: 'text-red-500'
+    }
+  }
+
+  if (isDegraded) {
+    return {
+      status: 'degraded',
+      label: 'Degraded',
+      variant: 'secondary' as const,
+      icon: AlertCircle,
+      color: 'text-yellow-500'
     }
   }
 
@@ -156,28 +133,15 @@ export function DeviceCard({
   showSelection = false,
   compact = false
 }: DeviceCardProps) {
-  // Initialize device health state based on authentication status
-  // For authenticated devices, start with healthy status to prevent flipping
   const [deviceHealth, setDeviceHealth] = useState<{
     health: 'healthy' | 'degraded' | 'offline' | 'checking' | 'unknown'
     network: string
     rtsp: string
     latency?: number
-  }>(() => {
-    if (device.authenticated) {
-      // Start with healthy for authenticated devices
-      return {
-        health: 'healthy',
-        network: 'reachable',
-        rtsp: 'unknown'
-      }
-    }
-    // For non-authenticated devices, start with unknown
-    return {
-      health: 'unknown',
-      network: 'unknown',
-      rtsp: 'unknown'
-    }
+  }>({
+    health: device.authenticated ? 'checking' : 'unknown',
+    network: 'unknown',
+    rtsp: 'unknown'
   })
 
   const [profileTagStatus, setProfileTagStatus] = useState<{
@@ -192,27 +156,11 @@ export function DeviceCard({
 
   // Health check for authenticated devices
   useEffect(() => {
-    console.log(`[DeviceCard] useEffect triggered for ${device.name}:`, {
-      authenticated: device.authenticated,
-      id: device.id,
-      status: device.status
-    })
-
     if (device.authenticated && device.id) {
-      // Delay initial health check slightly to avoid race conditions
-      const initialCheckTimer = setTimeout(() => {
-        checkDeviceHealth()
-      }, 500)
-
-      // Set up recurring health checks
-      const interval = setInterval(checkDeviceHealth, 10000) // Check every 10 seconds
-
-      return () => {
-        clearTimeout(initialCheckTimer)
-        clearInterval(interval)
-      }
+      checkDeviceHealth()
+      const interval = setInterval(checkDeviceHealth, 30000)
+      return () => clearInterval(interval)
     } else {
-      console.log(`[DeviceCard] ${device.name} not authenticated - setting unknown health`)
       setDeviceHealth({
         health: 'unknown',
         network: 'unknown',
@@ -227,50 +175,38 @@ export function DeviceCard({
       if (response.ok) {
         const data = await response.json()
         const health = data.devices?.find((d: any) => d.id === device.id)
-
         if (health) {
           setDeviceHealth({
-            health: health.health || 'healthy', // Default to healthy for authenticated
-            network: health.network || 'reachable',
+            health: health.health || 'unknown',
+            network: health.network || 'unknown',
             rtsp: health.rtsp || 'unknown',
             latency: health.latency
           })
-        } else if (device.authenticated) {
-          // No health data but device is authenticated = assume online
+        } else {
+          // If no health data, derive from device.status
+          const derivedHealth = device.status === 'discovered' || device.status === 'online' ? 'healthy' :
+            device.status === 'offline' || device.status === 'error' ? 'offline' :
+              'unknown'
           setDeviceHealth(prev => ({
             ...prev,
-            health: 'healthy',
-            network: 'reachable',
-            // Keep rtsp status if it was previously set
-            rtsp: prev.rtsp || 'unknown'
+            health: derivedHealth,
+            network: derivedHealth === 'healthy' ? 'reachable' :
+              derivedHealth === 'offline' ? 'unreachable' : 'unknown'
           }))
-        } else {
-          // Only set offline if not authenticated
-          setDeviceHealth({
-            health: 'unknown',
-            network: 'unknown',
-            rtsp: 'unknown'
-          })
         }
-      } else if (device.authenticated) {
-        // API error but device is authenticated - keep it as online
-        console.warn('Health check API error, assuming authenticated device is online')
-        setDeviceHealth(prev => ({
-          ...prev,
-          health: 'healthy',
-          network: 'reachable'
-        }))
       }
     } catch (error) {
-      // On network error for authenticated device, assume it's still online
-      if (device.authenticated) {
-        console.warn('Health check failed, but device is authenticated - assuming online')
-        setDeviceHealth(prev => ({
-          ...prev,
-          health: 'healthy',
-          network: 'reachable'
-        }))
-      }
+      console.error('Health check failed:', error)
+      // On error, derive from device.status
+      const derivedHealth = device.status === 'discovered' || device.status === 'online' ? 'healthy' :
+        device.status === 'offline' || device.status === 'error' ? 'offline' :
+          'unknown'
+      setDeviceHealth(prev => ({
+        ...prev,
+        health: derivedHealth,
+        network: derivedHealth === 'healthy' ? 'reachable' :
+          derivedHealth === 'offline' ? 'unreachable' : 'unknown'
+      }))
     }
   }
 

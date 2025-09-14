@@ -56,6 +56,12 @@ export function MainNavigation({ activeTab, onTabChange }: MainNavigationProps) 
       description: 'System Health Monitoring'
     },
     {
+      id: 'diagnostics',
+      label: 'Diagnostics',
+      icon: Activity,  // or use a different icon like Stethoscope
+      description: 'Device Health Monitoring'
+    },
+    {
       id: 'settings',
       label: 'Settings',
       icon: Settings,
@@ -76,7 +82,7 @@ export function MainNavigation({ activeTab, onTabChange }: MainNavigationProps) 
           {navigationTabs.map((tab) => {
             const Icon = tab.icon
             const isActive = activeTab === tab.id
-            
+
             return (
               <Button
                 key={tab.id}
@@ -85,8 +91,8 @@ export function MainNavigation({ activeTab, onTabChange }: MainNavigationProps) 
                 onClick={() => onTabChange(tab.id)}
                 className={`
                   relative flex items-center space-x-2 px-4 py-2 rounded-t-lg rounded-b-none
-                  ${isActive 
-                    ? 'bg-blue-600 text-white hover:bg-blue-700' 
+                  ${isActive
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
                     : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
                   }
                 `}
@@ -94,7 +100,7 @@ export function MainNavigation({ activeTab, onTabChange }: MainNavigationProps) 
               >
                 <Icon className="w-4 h-4" />
                 <span className="text-sm font-medium">{tab.label}</span>
-                
+
                 {isActive && (
                   <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-white"></div>
                 )}

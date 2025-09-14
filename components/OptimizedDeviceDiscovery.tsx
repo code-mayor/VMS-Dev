@@ -9,9 +9,11 @@ import { Progress } from './ui/progress'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { Checkbox } from './ui/checkbox'
 import { toast } from 'sonner'
+import { DeviceCard } from './cards/DeviceCard'
 import { ManualAddDeviceDialog } from './dialogs'
 import { DeviceAuthDialog } from './dialogs'
-import { ProfileManagementDialog } from './dialogs'
+// import { ProfileManagementDialog } from './dialogs'
+import ProfileManagementDialog from './dialogs/ProfileManagementDialog'
 import {
   Search,
   RefreshCw,
@@ -67,6 +69,7 @@ interface DiscoveredDevice {
 
 interface OptimizedDeviceDiscoveryProps {
   onDevicesDiscovered: (devices: DiscoveredDevice[]) => void
+  skipAutoDiscoveryIfDevicesExist?: boolean
 }
 
 interface FilterState {
@@ -87,7 +90,8 @@ interface VirtualListItem {
 const ITEMS_PER_PAGE = 50
 const VIRTUAL_ROW_HEIGHT = 120
 
-export function OptimizedDeviceDiscovery({ onDevicesDiscovered }: OptimizedDeviceDiscoveryProps) {
+export function OptimizedDeviceDiscovery({ onDevicesDiscovered,
+  skipAutoDiscoveryIfDevicesExist = true }: OptimizedDeviceDiscoveryProps) {
   // Persistent device state - this will prevent reset on navigation
   const [devices, setDevices] = useState<DiscoveredDevice[]>(() => {
     // Try to restore from sessionStorage
@@ -109,6 +113,10 @@ export function OptimizedDeviceDiscovery({ onDevicesDiscovered }: OptimizedDevic
   const [showProfileDialog, setShowProfileDialog] = useState(false)
   const [deviceToAuth, setDeviceToAuth] = useState<DiscoveredDevice | null>(null)
   const [deviceToConfigureProfiles, setDeviceToConfigureProfiles] = useState<DiscoveredDevice | null>(null)
+
+  // Auto-discovery state
+  const [autoDiscoveryTriggered, setAutoDiscoveryTriggered] = useState(false)
+  const [discoveryStage, setDiscoveryStage] = useState('')
 
   // Bulk authentication state
   const [showBulkAuthDialog, setShowBulkAuthDialog] = useState(false)
@@ -144,10 +152,40 @@ export function OptimizedDeviceDiscovery({ onDevicesDiscovered }: OptimizedDevic
     sessionStorage.setItem('onvif-discovery-filters', JSON.stringify(filters))
   }, [filters])
 
-  // Load devices from backend on component mount
+  // Auto-discovery on mount
   useEffect(() => {
-    loadExistingDevices()
-  }, [])
+    const initializeDiscovery = async () => {
+      // First, try to load existing devices
+      try {
+        const response = await fetch('http://localhost:3001/api/devices')
+        if (response.ok) {
+          const data = await response.json()
+          if (data.devices && data.devices.length > 0) {
+            console.log(`📱 Found ${data.devices.length} existing devices`)
+            setDevices(data.devices)
+            onDevicesDiscovered(data.devices)
+
+            // Only skip if the prop is true AND devices exist
+            if (skipAutoDiscoveryIfDevicesExist) {
+              setAutoDiscoveryTriggered(true)
+              return // Skip auto-discovery
+            }
+          }
+        }
+      } catch (error) {
+        console.warn('Could not check existing devices:', error)
+      }
+
+      // Auto-trigger discovery if not already triggered
+      if (!autoDiscoveryTriggered) {
+        console.log('🚀 Auto-triggering device discovery...')
+        setAutoDiscoveryTriggered(true)
+        setTimeout(() => handleDiscovery(true), 500)
+      }
+    }
+
+    initializeDiscovery()
+  }, []) // Empty deps = run once on mount
 
   const loadExistingDevices = async () => {
     try {
@@ -239,10 +277,13 @@ export function OptimizedDeviceDiscovery({ onDevicesDiscovered }: OptimizedDevic
     return { manufacturers, statuses, methods }
   }, [devices])
 
-  const handleDiscovery = async () => {
+  const handleDiscovery = async (isAutoDiscovery = false) => {
     setIsDiscovering(true)
     setDiscoveryProgress(0)
     setError('')
+
+    // Set stage message based on discovery type
+    setDiscoveryStage(isAutoDiscovery ? 'Auto-discovery starting...' : 'Manual discovery starting...')
 
     try {
       console.log('🔍 Starting optimized device discovery for large networks...')
@@ -458,95 +499,114 @@ export function OptimizedDeviceDiscovery({ onDevicesDiscovered }: OptimizedDevic
     URL.revokeObjectURL(url)
   }
 
+  // const renderDeviceCard = (device: DiscoveredDevice) => (
+  //   <Card key={device.id} className="hover:shadow-md transition-shadow">
+  //     <CardContent className="p-4">
+  //       <div className="flex items-start justify-between">
+  //         <div className="flex items-start space-x-3 flex-1 min-w-0">
+  //           <Checkbox
+  //             checked={selectedDevices.has(device.id)}
+  //             onCheckedChange={(checked) => handleSelectDevice(device.id, checked as boolean)}
+  //           />
+
+  //           <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center flex-shrink-0">
+  //             <Camera className="w-5 h-5 text-blue-600" />
+  //           </div>
+
+  //           <div className="flex-1 min-w-0">
+  //             <div className="flex items-center space-x-2 mb-1">
+  //               <h3 className="font-medium text-sm truncate">{device.name}</h3>
+  //               <Badge variant="outline" className="text-xs">
+  //                 {device.discovery_method.toUpperCase()}
+  //               </Badge>
+  //             </div>
+
+  //             <div className="text-xs text-gray-600 space-y-0.5">
+  //               <div className="truncate">
+  //                 <strong>IP:</strong> {device.ip_address}:{device.port}
+  //               </div>
+  //               <div className="truncate">
+  //                 <strong>Vendor:</strong> {device.manufacturer} {device.model}
+  //               </div>
+  //               <div className="flex items-center space-x-2 text-xs">
+  //                 <Badge variant={device.status === 'discovered' ? 'default' : 'secondary'} className="text-xs">
+  //                   {device.status}
+  //                 </Badge>
+  //                 {device.authenticated && (
+  //                   <Badge variant="default" className="text-xs">
+  //                     <CheckCircle className="w-3 h-3 mr-1" />
+  //                     Auth
+  //                   </Badge>
+  //                 )}
+  //               </div>
+  //             </div>
+  //           </div>
+  //         </div>
+
+  //         <div className="flex flex-col space-y-1 ml-3">
+  //           {!device.authenticated ? (
+  //             <Button
+  //               size="sm"
+  //               onClick={() => {
+  //                 setDeviceToAuth(device)
+  //                 setShowAuthDialog(true)
+  //               }}
+  //               className="text-xs px-3 py-1 h-auto"
+  //             >
+  //               <Lock className="w-3 h-3 mr-1" />
+  //               Auth
+  //             </Button>
+  //           ) : (
+  //             <div className="flex space-x-1">
+  //               <Button
+  //                 variant="outline"
+  //                 size="sm"
+  //                 onClick={() => {
+  //                   setDeviceToAuth(device)
+  //                   setShowAuthDialog(true)
+  //                 }}
+  //                 className="text-xs px-2 py-1 h-auto"
+  //                 title="Update credentials"
+  //               >
+  //                 <Settings className="w-3 h-3" />
+  //               </Button>
+  //               <Button
+  //                 variant={device.profiles_configured ? "default" : "secondary"}
+  //                 size="sm"
+  //                 onClick={() => {
+  //                   setDeviceToConfigureProfiles(device)
+  //                   setShowProfileDialog(true)
+  //                 }}
+  //                 className="text-xs px-2 py-1 h-auto"
+  //                 title="Configure profiles"
+  //               >
+  //                 <Tag className="w-3 h-3" />
+  //               </Button>
+  //             </div>
+  //           )}
+  //         </div>
+  //       </div>
+  //     </CardContent>
+  //   </Card>
+  // )
+
   const renderDeviceCard = (device: DiscoveredDevice) => (
-    <Card key={device.id} className="hover:shadow-md transition-shadow">
-      <CardContent className="p-4">
-        <div className="flex items-start justify-between">
-          <div className="flex items-start space-x-3 flex-1 min-w-0">
-            <Checkbox
-              checked={selectedDevices.has(device.id)}
-              onCheckedChange={(checked) => handleSelectDevice(device.id, checked as boolean)}
-            />
-
-            <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center flex-shrink-0">
-              <Camera className="w-5 h-5 text-blue-600" />
-            </div>
-
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center space-x-2 mb-1">
-                <h3 className="font-medium text-sm truncate">{device.name}</h3>
-                <Badge variant="outline" className="text-xs">
-                  {device.discovery_method.toUpperCase()}
-                </Badge>
-              </div>
-
-              <div className="text-xs text-gray-600 space-y-0.5">
-                <div className="truncate">
-                  <strong>IP:</strong> {device.ip_address}:{device.port}
-                </div>
-                <div className="truncate">
-                  <strong>Vendor:</strong> {device.manufacturer} {device.model}
-                </div>
-                <div className="flex items-center space-x-2 text-xs">
-                  <Badge variant={device.status === 'discovered' ? 'default' : 'secondary'} className="text-xs">
-                    {device.status}
-                  </Badge>
-                  {device.authenticated && (
-                    <Badge variant="default" className="text-xs">
-                      <CheckCircle className="w-3 h-3 mr-1" />
-                      Auth
-                    </Badge>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex flex-col space-y-1 ml-3">
-            {!device.authenticated ? (
-              <Button
-                size="sm"
-                onClick={() => {
-                  setDeviceToAuth(device)
-                  setShowAuthDialog(true)
-                }}
-                className="text-xs px-3 py-1 h-auto"
-              >
-                <Lock className="w-3 h-3 mr-1" />
-                Auth
-              </Button>
-            ) : (
-              <div className="flex space-x-1">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    setDeviceToAuth(device)
-                    setShowAuthDialog(true)
-                  }}
-                  className="text-xs px-2 py-1 h-auto"
-                  title="Update credentials"
-                >
-                  <Settings className="w-3 h-3" />
-                </Button>
-                <Button
-                  variant={device.profiles_configured ? "default" : "secondary"}
-                  size="sm"
-                  onClick={() => {
-                    setDeviceToConfigureProfiles(device)
-                    setShowProfileDialog(true)
-                  }}
-                  className="text-xs px-2 py-1 h-auto"
-                  title="Configure profiles"
-                >
-                  <Tag className="w-3 h-3" />
-                </Button>
-              </div>
-            )}
-          </div>
-        </div>
-      </CardContent>
-    </Card>
+    <DeviceCard
+      key={device.id}
+      device={device}
+      compact={true}
+      isSelected={selectedDevices.has(device.id)}
+      onSelectionChange={(checked) => handleSelectDevice(device.id, checked)}
+      showSelection={true}
+      onAuthenticate={() => {
+        setDeviceToAuth(device)
+        setShowAuthDialog(true)
+      }}
+      onConfigureProfiles={() => {
+        setDeviceToConfigureProfiles(device)
+        setShowProfileDialog(true)
+      }}
+    />
   )
 
   const renderDeviceRow = (device: DiscoveredDevice) => (
@@ -657,7 +717,7 @@ export function OptimizedDeviceDiscovery({ onDevicesDiscovered }: OptimizedDevic
             </Button>
 
             <Button
-              onClick={handleDiscovery}
+              onClick={() => handleDiscovery(false)}
               disabled={isDiscovering}
               size="lg"
             >
@@ -825,6 +885,19 @@ export function OptimizedDeviceDiscovery({ onDevicesDiscovered }: OptimizedDevic
         </div>
       </div>
 
+      {/* Auto-Discovery Status */}
+      {autoDiscoveryTriggered && !isDiscovering && devices.length === 0 && !error && (
+        <div className="flex-shrink-0 p-6">
+          <Alert>
+            <Clock className="h-4 w-4" />
+            <AlertDescription>
+              <strong>Auto-discovery completed.</strong> No devices were found automatically.
+              You can use "Start Discovery" to scan again or "Add Manual" for known devices.
+            </AlertDescription>
+          </Alert>
+        </div>
+      )}
+
       {/* Error Display */}
       {error && (
         <div className="flex-shrink-0 p-6">
@@ -852,7 +925,7 @@ export function OptimizedDeviceDiscovery({ onDevicesDiscovered }: OptimizedDevic
                   }
                 </p>
                 {devices.length === 0 && (
-                  <Button onClick={handleDiscovery}>
+                  <Button onClick={() => handleDiscovery(false)}>
                     <Zap className="w-4 h-4 mr-2" />
                     Discover Devices
                   </Button>

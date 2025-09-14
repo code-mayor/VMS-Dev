@@ -2,10 +2,12 @@ const dgram = require('dgram');
 const os = require('os');
 const fetch = require('node-fetch');
 const { logger } = require('../utils/logger');
+const { DeviceStatusManager } = require('./device-status-manager');
 
 class EnhancedOnvifDiscovery {
   constructor() {
     this.discoveredDevices = new Map();
+    this.statusManager = new DeviceStatusManager();
     // More aggressive ONVIF discovery timeouts
     this.onvifDiscoveryTimeout = 12000; // 12 seconds for proper ONVIF discovery
     this.networkScanTimeout = 5000; // 5 seconds for IP scan fallback
@@ -17,7 +19,7 @@ class EnhancedOnvifDiscovery {
    */
   async discoverDevices() {
     logger.info('🔍 Starting enhanced ONVIF device discovery...');
-    
+
     const results = {
       onvifDevices: [],
       ipCameras: [],
@@ -32,7 +34,7 @@ class EnhancedOnvifDiscovery {
       results.onvifDevices = await this.enhancedOnvifDiscovery();
 
       // Priority 2: SSDP ONVIF Discovery
-      logger.info('📡 Priority 2: SSDP ONVIF Discovery');  
+      logger.info('📡 Priority 2: SSDP ONVIF Discovery');
       results.networkDevices = await this.enhancedSsdpDiscovery();
 
       // Priority 3: Only use IP scanning if no ONVIF devices found
@@ -86,16 +88,16 @@ class EnhancedOnvifDiscovery {
       }
 
       logger.info(`📡 Enhanced ONVIF discovery on ${interfaces.length} interface(s)...`);
-      
+
       interfaces.forEach(iface => {
         const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
         let probeCount = 0;
         const maxProbes = 3; // More thorough probing
-        
+
         socket.on('message', (msg, rinfo) => {
           try {
             const message = msg.toString('utf8');
-            
+
             if (this.isValidOnvifResponse(message)) {
               logger.info(`🎯 Valid ONVIF response from ${rinfo.address}`);
               const device = this.parseEnhancedOnvifResponse(message, rinfo);
@@ -103,8 +105,8 @@ class EnhancedOnvifDiscovery {
                 device.network_interface = iface.name;
                 device.discovery_method = 'onvif';
                 devices.push(device);
-                logger.info(`📹 ONVIF device discovered: ${device.name} at ${device.ip_address}`);
-                
+                logger.info(`🔹 ONVIF device discovered: ${device.name} at ${device.ip_address}`);
+
                 // Immediately try to validate ONVIF capabilities
                 this.validateOnvifDevice(device).then(validatedDevice => {
                   if (validatedDevice) {
@@ -128,30 +130,30 @@ class EnhancedOnvifDiscovery {
             socket.setBroadcast(true);
             socket.setMulticastTTL(2); // Increase TTL for better reach
             socket.setMulticastLoopback(true);
-            
+
             // Join ONVIF multicast group
             socket.addMembership('239.255.255.250', iface.address);
-            
+
             logger.info(`✅ ONVIF socket bound to ${iface.name} (${iface.address})`);
 
             // Enhanced probe sequence with different message variations
             const sendEnhancedProbe = () => {
               if (probeCount >= maxProbes) return;
-              
+
               // Try different ONVIF probe messages for better compatibility
               const probeMessages = [
                 this.createStandardOnvifProbe(),
                 this.createEnhancedOnvifProbe(),
                 this.createCompatibilityOnvifProbe()
               ];
-              
+
               const probeMessage = probeMessages[probeCount] || probeMessages[0];
-              
+
               socket.send(probeMessage, 3702, '239.255.255.250', (err) => {
                 if (!err) {
                   probeCount++;
                   logger.info(`📡 Enhanced ONVIF probe ${probeCount}/${maxProbes} sent on ${iface.name}`);
-                  
+
                   // Stagger probes for better response handling
                   if (probeCount < maxProbes) {
                     setTimeout(sendEnhancedProbe, 2000); // 2 second intervals
@@ -164,7 +166,7 @@ class EnhancedOnvifDiscovery {
 
             // Start probing immediately
             sendEnhancedProbe();
-            
+
           } catch (error) {
             logger.warn(`⚠️ ONVIF setup failed on ${iface.name}:`, error.message);
           }
@@ -177,7 +179,7 @@ class EnhancedOnvifDiscovery {
           } catch (error) {
             // Ignore cleanup errors
           }
-          
+
           completedInterfaces++;
           if (completedInterfaces === interfaces.length) {
             logger.info(`✅ Enhanced ONVIF discovery completed. Found ${devices.length} ONVIF devices`);
@@ -211,7 +213,7 @@ class EnhancedOnvifDiscovery {
             if (device && !devices.find(d => d.ip_address === device.ip_address)) {
               device.discovery_method = 'ssdp_onvif';
               devices.push(device);
-              logger.info(`📹 SSDP ONVIF device: ${device.name} at ${device.ip_address}`);
+              logger.info(`🔹 SSDP ONVIF device: ${device.name} at ${device.ip_address}`);
             }
           }
         } catch (error) {
@@ -227,10 +229,10 @@ class EnhancedOnvifDiscovery {
         socket.setBroadcast(true);
         socket.setMulticastTTL(2);
         socket.setMulticastLoopback(true);
-        
+
         try {
           socket.addMembership('239.255.255.250');
-          
+
           // Enhanced ONVIF-specific SSDP searches
           const onvifSsdpSearches = [
             'urn:schemas-onvif-org:device:NetworkVideoTransmitter:1',
@@ -252,7 +254,7 @@ class EnhancedOnvifDiscovery {
               });
             }, index * 1000); // 1 second intervals
           });
-          
+
         } catch (error) {
           logger.warn('⚠️ SSDP multicast setup failed:', error.message);
         }
@@ -275,10 +277,10 @@ class EnhancedOnvifDiscovery {
    */
   async scanNetworkForCameras() {
     logger.info('🔍 Starting network IP scan (fallback only)...');
-    
+
     const devices = [];
     const interfaces = this.getNetworkInterfaces();
-    
+
     // Only scan primary interface
     const primaryInterface = interfaces[0];
     if (!primaryInterface) {
@@ -289,22 +291,22 @@ class EnhancedOnvifDiscovery {
     try {
       const subnet = this.getSubnet(primaryInterface.address, primaryInterface.netmask);
       logger.info(`🌐 Fallback scanning subnet: ${subnet}`);
-      
+
       // Quick scan of high-probability IPs
       const targetIPs = this.getHighProbabilityCameraIPs(subnet);
-      
-      const promises = targetIPs.map(ip => 
+
+      const promises = targetIPs.map(ip =>
         this.quickCheckIpForCamera(ip, primaryInterface.name)
       );
-      
+
       const results = await Promise.allSettled(promises);
-      
+
       for (const result of results) {
         if (result.status === 'fulfilled' && result.value) {
           devices.push(result.value);
         }
       }
-      
+
     } catch (error) {
       logger.warn(`⚠️ Network scan failed:`, error.message);
     }
@@ -417,16 +419,21 @@ class EnhancedOnvifDiscovery {
       'EndpointReference'
     ];
 
-    return onvifIndicators.some(indicator => 
+    return onvifIndicators.some(indicator =>
       message.toLowerCase().includes(indicator.toLowerCase())
     );
   }
 
   /**
-   * Enhanced ONVIF response parsing
+   * Enhanced ONVIF response parsing with dynamic capabilities
    */
   parseEnhancedOnvifResponse(message, rinfo) {
     try {
+      const currentTime = new Date().toISOString();
+
+      // Initialize with minimal default capabilities
+      const capabilities = this.extractCapabilitiesFromResponse(message);
+
       const device = {
         id: `onvif-${rinfo.address.replace(/\./g, '-')}`,
         name: `ONVIF Device at ${rinfo.address}`,
@@ -435,10 +442,10 @@ class EnhancedOnvifDiscovery {
         manufacturer: 'Unknown',
         model: 'ONVIF Device',
         discovery_method: 'onvif',
-        status: 'discovered',
-        capabilities: { video: true, audio: false, ptz: false, onvif: true },
-        discovered_at: new Date().toISOString(),
-        last_seen: new Date().toISOString()
+        status: this.statusManager.getDiscoveryStatus({ last_seen: currentTime }),
+        capabilities: capabilities,
+        discovered_at: currentTime,
+        last_seen: currentTime
       };
 
       // Enhanced endpoint extraction
@@ -450,8 +457,8 @@ class EnhancedOnvifDiscovery {
           device.ip_address = urlMatches[1];
           device.port = urlMatches[2] ? parseInt(urlMatches[2]) : 80;
           device.endpoint = `http://${device.ip_address}:${device.port}${urlMatches[3] || '/onvif/device_service'}`;
-          
-          logger.info(`📍 ONVIF endpoint: ${device.endpoint}`);
+
+          logger.info(`🔍 ONVIF endpoint: ${device.endpoint}`);
         }
       }
 
@@ -460,7 +467,7 @@ class EnhancedOnvifDiscovery {
       if (scopeMatches) {
         const scopes = scopeMatches[1];
         device.scopes = scopes;
-        
+
         // Extract manufacturer
         const hwMatches = scopes.match(/hardware\/([^\/\s]+)/i);
         if (hwMatches) {
@@ -469,7 +476,7 @@ class EnhancedOnvifDiscovery {
             device.name = `${device.manufacturer} Camera`;
           }
         }
-        
+
         // Extract device name
         const nameMatches = scopes.match(/name\/([^\/\s]+)/i);
         if (nameMatches) {
@@ -479,15 +486,17 @@ class EnhancedOnvifDiscovery {
           }
         }
 
-        // Check for PTZ capability
-        if (scopes.toLowerCase().includes('ptz')) {
-          device.capabilities.ptz = true;
-        }
+        // Update capabilities based on scopes
+        const scopeCapabilities = this.extractCapabilitiesFromScopes(scopes);
+        device.capabilities = { ...device.capabilities, ...scopeCapabilities };
+      }
 
-        // Check for audio capability
-        if (scopes.toLowerCase().includes('audio')) {
-          device.capabilities.audio = true;
-        }
+      // Extract Types for additional capability information
+      const typesMatches = message.match(/<.*?Types.*?>(.*?)<\/.*?Types.*?>/i);
+      if (typesMatches) {
+        const types = typesMatches[1];
+        const typeCapabilities = this.extractCapabilitiesFromTypes(types);
+        device.capabilities = { ...device.capabilities, ...typeCapabilities };
       }
 
       return device;
@@ -495,6 +504,149 @@ class EnhancedOnvifDiscovery {
       logger.warn('⚠️ Error parsing enhanced ONVIF response:', error.message);
       return null;
     }
+  }
+
+  /**
+   * Extract capabilities from ONVIF response message
+   */
+  extractCapabilitiesFromResponse(message) {
+    const capabilities = {
+      video: false,
+      audio: false,
+      ptz: false,
+      onvif: false,
+      analytics: false,
+      events: false,
+      recording: false,
+      replay: false,
+      metadata: false
+    };
+
+    const messageLower = message.toLowerCase();
+
+    // Check for video capability (default for most cameras)
+    if (messageLower.includes('networkvideotransmitter') ||
+      messageLower.includes('media') ||
+      messageLower.includes('video')) {
+      capabilities.video = true;
+    }
+
+    // Check for ONVIF capability
+    if (messageLower.includes('onvif') || messageLower.includes('device')) {
+      capabilities.onvif = true;
+    }
+
+    // Check for audio capability
+    if (messageLower.includes('audio') || messageLower.includes('backchannel')) {
+      capabilities.audio = true;
+    }
+
+    // Check for PTZ capability
+    if (messageLower.includes('ptz')) {
+      capabilities.ptz = true;
+    }
+
+    // Check for analytics capability
+    if (messageLower.includes('analytics') || messageLower.includes('videoanalytics')) {
+      capabilities.analytics = true;
+    }
+
+    // Check for events capability
+    if (messageLower.includes('event') || messageLower.includes('notification')) {
+      capabilities.events = true;
+    }
+
+    // Check for recording capability
+    if (messageLower.includes('recording') || messageLower.includes('storage')) {
+      capabilities.recording = true;
+    }
+
+    // Check for replay capability
+    if (messageLower.includes('replay') || messageLower.includes('playback')) {
+      capabilities.replay = true;
+    }
+
+    // Check for metadata capability
+    if (messageLower.includes('metadata')) {
+      capabilities.metadata = true;
+    }
+
+    return capabilities;
+  }
+
+  /**
+   * Extract capabilities from ONVIF scopes
+   */
+  extractCapabilitiesFromScopes(scopes) {
+    const capabilities = {};
+    const scopesLower = scopes.toLowerCase();
+
+    // PTZ capability
+    if (scopesLower.includes('ptz') || scopesLower.includes('pan') ||
+      scopesLower.includes('tilt') || scopesLower.includes('zoom')) {
+      capabilities.ptz = true;
+    }
+
+    // Audio capability
+    if (scopesLower.includes('audio') || scopesLower.includes('backchannel') ||
+      scopesLower.includes('speaker') || scopesLower.includes('microphone')) {
+      capabilities.audio = true;
+    }
+
+    // Video capability
+    if (scopesLower.includes('video') || scopesLower.includes('stream')) {
+      capabilities.video = true;
+    }
+
+    // Analytics capability
+    if (scopesLower.includes('analytics') || scopesLower.includes('motion') ||
+      scopesLower.includes('detection')) {
+      capabilities.analytics = true;
+    }
+
+    // Events capability
+    if (scopesLower.includes('event')) {
+      capabilities.events = true;
+    }
+
+    // Recording capability
+    if (scopesLower.includes('record') || scopesLower.includes('storage')) {
+      capabilities.recording = true;
+    }
+
+    return capabilities;
+  }
+
+  /**
+   * Extract capabilities from ONVIF types
+   */
+  extractCapabilitiesFromTypes(types) {
+    const capabilities = {};
+    const typesLower = types.toLowerCase();
+
+    // Network Video Transmitter usually means video capability
+    if (typesLower.includes('networkvideotransmitter')) {
+      capabilities.video = true;
+      capabilities.onvif = true;
+    }
+
+    // Network Video Display
+    if (typesLower.includes('networkvideodisplay')) {
+      capabilities.video = true;
+      capabilities.onvif = true;
+    }
+
+    // PTZ Device
+    if (typesLower.includes('ptzdevice')) {
+      capabilities.ptz = true;
+    }
+
+    // Analytics Device
+    if (typesLower.includes('analyticsdevice')) {
+      capabilities.analytics = true;
+    }
+
+    return capabilities;
   }
 
   /**
@@ -526,10 +678,118 @@ class EnhancedOnvifDiscovery {
         return this.parseDeviceInfoResponse(responseText, device);
       }
 
-      return null;
+      // Try to get capabilities if device info fails
+      return await this.getDeviceCapabilities(device);
     } catch (error) {
       logger.warn(`⚠️ ONVIF validation failed for ${device.ip_address}:`, error.message);
       return null;
+    }
+  }
+
+  /**
+   * Get device capabilities through ONVIF GetCapabilities
+   */
+  async getDeviceCapabilities(device) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.deviceResponseTimeout);
+
+      const response = await fetch(device.endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/soap+xml; charset=utf-8',
+          'SOAPAction': '"http://www.onvif.org/ver10/device/wsdl/GetCapabilities"'
+        },
+        body: this.createGetCapabilitiesRequest(),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const responseText = await response.text();
+        return this.parseCapabilitiesResponse(responseText, device);
+      }
+
+      return null;
+    } catch (error) {
+      logger.warn(`⚠️ Failed to get capabilities for ${device.ip_address}:`, error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Create GetCapabilities SOAP request
+   */
+  createGetCapabilitiesRequest() {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
+  <soap:Header/>
+  <soap:Body>
+    <tds:GetCapabilities>
+      <tds:Category>All</tds:Category>
+    </tds:GetCapabilities>
+  </soap:Body>
+</soap:Envelope>`;
+  }
+
+  /**
+   * Parse GetCapabilities response
+   */
+  parseCapabilitiesResponse(responseText, device) {
+    try {
+      const capabilities = { ...device.capabilities };
+
+      // Check for Media capability
+      if (responseText.includes('Media') || responseText.includes('VideoSources')) {
+        capabilities.video = true;
+      }
+
+      // Check for PTZ capability
+      if (responseText.includes('PTZ') || responseText.includes('PanTilt')) {
+        capabilities.ptz = true;
+      }
+
+      // Check for Analytics capability
+      if (responseText.includes('Analytics') || responseText.includes('VideoAnalytics')) {
+        capabilities.analytics = true;
+      }
+
+      // Check for Events capability
+      if (responseText.includes('Events') || responseText.includes('EventService')) {
+        capabilities.events = true;
+      }
+
+      // Check for Recording capability
+      if (responseText.includes('Recording') || responseText.includes('RecordingConfiguration')) {
+        capabilities.recording = true;
+      }
+
+      // Check for Replay capability
+      if (responseText.includes('Replay') || responseText.includes('SearchService')) {
+        capabilities.replay = true;
+      }
+
+      // Check for Audio capability
+      if (responseText.includes('AudioSources') || responseText.includes('AudioOutputs')) {
+        capabilities.audio = true;
+      }
+
+      // Check for Metadata capability
+      if (responseText.includes('Metadata')) {
+        capabilities.metadata = true;
+      }
+
+      device.capabilities = capabilities;
+      device.status = this.statusManager.getDiscoveryStatus({
+        last_seen: new Date().toISOString(),
+        validated: true
+      });
+
+      return device;
+    } catch (error) {
+      logger.warn('⚠️ Error parsing capabilities response:', error.message);
+      return device;
     }
   }
 
@@ -566,9 +826,13 @@ class EnhancedOnvifDiscovery {
       }
 
       device.capabilities.onvif = true;
-      device.status = 'validated';
+      device.status = this.statusManager.getDiscoveryStatus({
+        last_seen: new Date().toISOString(),
+        validated: true
+      });
 
-      return device;
+      // Try to get additional capabilities
+      return this.getDeviceCapabilities(device) || device;
     } catch (error) {
       logger.warn('⚠️ Error parsing device info response:', error.message);
       return device;
@@ -585,21 +849,26 @@ class EnhancedOnvifDiscovery {
 
     const onvifKeywords = [
       'onvif',
-      'NetworkVideoTransmitter', 
+      'NetworkVideoTransmitter',
       'MediaManagement',
       'DeviceManagement'
     ];
 
-    return onvifKeywords.some(keyword => 
+    return onvifKeywords.some(keyword =>
       message.toLowerCase().includes(keyword.toLowerCase())
     );
   }
 
   /**
-   * Enhanced SSDP response parsing
+   * Enhanced SSDP response parsing with dynamic capabilities
    */
   parseEnhancedSsdpResponse(message, rinfo) {
     try {
+      const currentTime = new Date().toISOString();
+
+      // Extract capabilities from SSDP response
+      const capabilities = this.extractCapabilitiesFromSsdp(message);
+
       const device = {
         id: `ssdp-onvif-${rinfo.address.replace(/\./g, '-')}`,
         name: `ONVIF Device at ${rinfo.address}`,
@@ -608,10 +877,10 @@ class EnhancedOnvifDiscovery {
         manufacturer: 'Unknown',
         model: 'ONVIF Device',
         discovery_method: 'ssdp_onvif',
-        status: 'discovered',
-        capabilities: { video: true, audio: false, ptz: false, onvif: true },
-        discovered_at: new Date().toISOString(),
-        last_seen: new Date().toISOString()
+        status: this.statusManager.getDiscoveryStatus({ last_seen: currentTime }),
+        capabilities: capabilities,
+        discovered_at: currentTime,
+        last_seen: currentTime
       };
 
       const locationMatch = message.match(/LOCATION:\s*(.*)/i);
@@ -632,6 +901,41 @@ class EnhancedOnvifDiscovery {
         if (server.toLowerCase().includes('onvif')) {
           device.capabilities.onvif = true;
         }
+
+        // Try to extract manufacturer from server string
+        const manufacturerPatterns = [
+          /(\w+)\s+ONVIF/i,
+          /(\w+)\/[\d.]+/,
+          /^(\w+)\s+/
+        ];
+
+        for (const pattern of manufacturerPatterns) {
+          const match = server.match(pattern);
+          if (match && match[1]) {
+            device.manufacturer = match[1];
+            device.name = `${device.manufacturer} Camera`;
+            break;
+          }
+        }
+      }
+
+      // Extract USN for unique identification
+      const usnMatch = message.match(/USN:\s*(.*)/i);
+      if (usnMatch) {
+        device.usn = usnMatch[1].trim();
+      }
+
+      // Extract ST (Search Target) for capability hints
+      const stMatch = message.match(/ST:\s*(.*)/i);
+      if (stMatch) {
+        const st = stMatch[1].trim().toLowerCase();
+        if (st.includes('networkvideotransmitter')) {
+          device.capabilities.video = true;
+          device.capabilities.onvif = true;
+        }
+        if (st.includes('mediamanagement')) {
+          device.capabilities.video = true;
+        }
       }
 
       return device;
@@ -642,12 +946,63 @@ class EnhancedOnvifDiscovery {
   }
 
   /**
+   * Extract capabilities from SSDP message
+   */
+  extractCapabilitiesFromSsdp(message) {
+    const capabilities = {
+      video: false,
+      audio: false,
+      ptz: false,
+      onvif: false,
+      analytics: false,
+      events: false,
+      recording: false,
+      replay: false,
+      metadata: false
+    };
+
+    const messageLower = message.toLowerCase();
+
+    // Check for ONVIF capability
+    if (messageLower.includes('onvif')) {
+      capabilities.onvif = true;
+      capabilities.video = true; // ONVIF devices typically have video
+    }
+
+    // Check for video capability
+    if (messageLower.includes('networkvideotransmitter') ||
+      messageLower.includes('mediamanagement') ||
+      messageLower.includes('video')) {
+      capabilities.video = true;
+    }
+
+    // Check for other capabilities in ST or Server headers
+    if (messageLower.includes('ptz')) {
+      capabilities.ptz = true;
+    }
+
+    if (messageLower.includes('audio')) {
+      capabilities.audio = true;
+    }
+
+    if (messageLower.includes('analytics')) {
+      capabilities.analytics = true;
+    }
+
+    if (messageLower.includes('event')) {
+      capabilities.events = true;
+    }
+
+    return capabilities;
+  }
+
+  /**
    * High-probability camera IP addresses (only used as fallback)
    */
   getHighProbabilityCameraIPs(subnet) {
     const [baseIp] = subnet.split('/');
     const [a, b, c] = baseIp.split('.').map(Number);
-    
+
     return [
       `${a}.${b}.${c}.201`, `${a}.${b}.${c}.200`, `${a}.${b}.${c}.202`,
       `${a}.${b}.${c}.100`, `${a}.${b}.${c}.101`, `${a}.${b}.${c}.102`,
@@ -656,21 +1011,26 @@ class EnhancedOnvifDiscovery {
   }
 
   /**
-   * Quick camera detection for fallback scan
+   * Quick camera detection for fallback scan with dynamic capabilities
    */
   async quickCheckIpForCamera(ip, interfaceName) {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1000);
-      
+
       const response = await fetch(`http://${ip}:80`, {
         method: 'HEAD',
         signal: controller.signal
       });
-      
+
       clearTimeout(timeoutId);
 
       if (response.ok || response.status === 401 || response.status === 403) {
+        const currentTime = new Date().toISOString();
+
+        // Extract capabilities from HTTP headers
+        const capabilities = this.extractCapabilitiesFromHeaders(response.headers);
+
         const device = {
           id: `ip-${ip.replace(/\./g, '-')}-80`,
           name: `Camera at ${ip}`,
@@ -680,20 +1040,51 @@ class EnhancedOnvifDiscovery {
           model: 'IP Camera',
           discovery_method: 'ip_scan',
           network_interface: interfaceName,
-          status: 'discovered',
-          capabilities: { video: true, audio: false, ptz: false },
-          discovered_at: new Date().toISOString(),
-          last_seen: new Date().toISOString()
+          status: this.statusManager.getDiscoveryStatus({ last_seen: currentTime }),
+          capabilities: capabilities,
+          discovered_at: currentTime,
+          last_seen: currentTime
         };
 
-        // Quick manufacturer detection
+        // Quick manufacturer detection from headers
         const server = response.headers.get('server');
         if (server) {
           const serverLower = server.toLowerCase();
-          if (serverLower.includes('honeywell')) {
-            device.manufacturer = 'Honeywell';
-            device.name = `Honeywell Camera at ${ip}`;
-            device.capabilities.onvif = true; // Honeywell usually supports ONVIF
+
+          // Check for known manufacturers
+          const manufacturers = {
+            'honeywell': { name: 'Honeywell', onvif: true },
+            'hikvision': { name: 'Hikvision', onvif: true },
+            'dahua': { name: 'Dahua', onvif: true },
+            'axis': { name: 'Axis', onvif: true },
+            'bosch': { name: 'Bosch', onvif: true },
+            'panasonic': { name: 'Panasonic', onvif: true },
+            'sony': { name: 'Sony', onvif: true },
+            'pelco': { name: 'Pelco', onvif: true },
+            'vivotek': { name: 'Vivotek', onvif: true },
+            'hanwha': { name: 'Hanwha', onvif: true },
+            'samsung': { name: 'Samsung', onvif: true }
+          };
+
+          for (const [key, info] of Object.entries(manufacturers)) {
+            if (serverLower.includes(key)) {
+              device.manufacturer = info.name;
+              device.name = `${info.name} Camera at ${ip}`;
+              if (info.onvif) {
+                device.capabilities.onvif = true;
+              }
+              break;
+            }
+          }
+        }
+
+        // Check WWW-Authenticate header for authentication hints
+        const authHeader = response.headers.get('www-authenticate');
+        if (authHeader) {
+          if (authHeader.toLowerCase().includes('digest')) {
+            device.auth_type = 'digest';
+          } else if (authHeader.toLowerCase().includes('basic')) {
+            device.auth_type = 'basic';
           }
         }
 
@@ -707,6 +1098,65 @@ class EnhancedOnvifDiscovery {
   }
 
   /**
+   * Extract capabilities from HTTP headers
+   */
+  extractCapabilitiesFromHeaders(headers) {
+    const capabilities = {
+      video: true, // Default for IP cameras
+      audio: false,
+      ptz: false,
+      onvif: false,
+      analytics: false,
+      events: false,
+      recording: false,
+      replay: false,
+      metadata: false
+    };
+
+    // Check server header for ONVIF support
+    const server = headers.get('server');
+    if (server) {
+      const serverLower = server.toLowerCase();
+      if (serverLower.includes('onvif')) {
+        capabilities.onvif = true;
+      }
+
+      // Some manufacturers include capability hints
+      if (serverLower.includes('ptz')) {
+        capabilities.ptz = true;
+      }
+
+      if (serverLower.includes('audio')) {
+        capabilities.audio = true;
+      }
+    }
+
+    // Check X-* headers that might indicate capabilities
+    for (const [key, value] of headers.entries()) {
+      const keyLower = key.toLowerCase();
+      const valueLower = value.toLowerCase();
+
+      if (keyLower.includes('onvif') || valueLower.includes('onvif')) {
+        capabilities.onvif = true;
+      }
+
+      if (keyLower.includes('ptz') || valueLower.includes('ptz')) {
+        capabilities.ptz = true;
+      }
+
+      if (keyLower.includes('audio') || valueLower.includes('audio')) {
+        capabilities.audio = true;
+      }
+
+      if (keyLower.includes('analytics') || valueLower.includes('analytics')) {
+        capabilities.analytics = true;
+      }
+    }
+
+    return capabilities;
+  }
+
+  /**
    * Get network interfaces with enhanced filtering
    */
   getNetworkInterfaces() {
@@ -715,17 +1165,17 @@ class EnhancedOnvifDiscovery {
 
     for (const [name, addrs] of Object.entries(networkInterfaces)) {
       if (!addrs) continue;
-      
+
       for (const addr of addrs) {
         if (addr.family === 'IPv4' && !addr.internal && addr.address !== '127.0.0.1') {
           // Enhanced filtering for real interfaces
-          if (!name.toLowerCase().includes('docker') && 
-              !name.toLowerCase().includes('veth') &&
-              !name.toLowerCase().includes('br-') &&
-              !name.toLowerCase().includes('virbr') &&
-              !name.toLowerCase().includes('vmnet') &&
-              !addr.address.startsWith('169.254.') &&
-              !addr.address.startsWith('172.17.')) {
+          if (!name.toLowerCase().includes('docker') &&
+            !name.toLowerCase().includes('veth') &&
+            !name.toLowerCase().includes('br-') &&
+            !name.toLowerCase().includes('virbr') &&
+            !name.toLowerCase().includes('vmnet') &&
+            !addr.address.startsWith('169.254.') &&
+            !addr.address.startsWith('172.17.')) {
             interfaces.push({
               name,
               address: addr.address,
@@ -756,7 +1206,7 @@ class EnhancedOnvifDiscovery {
   getSubnet(ip, netmask) {
     const ipParts = ip.split('.').map(Number);
     const maskParts = netmask.split('.').map(Number);
-    
+
     const networkParts = ipParts.map((part, i) => part & maskParts[i]);
     const cidr = maskParts.reduce((count, part) => {
       return count + part.toString(2).split('1').length - 1;
@@ -770,24 +1220,25 @@ class EnhancedOnvifDiscovery {
    */
   combineAndDeduplicateDevices(devices) {
     const uniqueDevices = new Map();
-    
+
     // Sort by discovery method priority
     const sortedDevices = devices.sort((a, b) => {
       const priorityOrder = ['onvif', 'ssdp_onvif', 'ssdp', 'ip_scan'];
       return priorityOrder.indexOf(a.discovery_method) - priorityOrder.indexOf(b.discovery_method);
     });
-    
+
     sortedDevices.forEach(device => {
       const key = device.ip_address;
-      
+
       if (!uniqueDevices.has(key)) {
         uniqueDevices.set(key, device);
       } else {
-        // Merge capabilities, keeping ONVIF discovery as primary
+        // Merge capabilities and info, keeping ONVIF discovery as primary
         const existing = uniqueDevices.get(key);
+
+        // If new device has better discovery method, use it as base
         if (device.discovery_method === 'onvif' && existing.discovery_method !== 'onvif') {
           uniqueDevices.set(key, {
-            ...existing,
             ...device,
             capabilities: {
               ...existing.capabilities,
@@ -795,6 +1246,24 @@ class EnhancedOnvifDiscovery {
               onvif: true
             }
           });
+        } else {
+          // Otherwise merge capabilities into existing
+          existing.capabilities = {
+            ...existing.capabilities,
+            ...device.capabilities
+          };
+
+          // Update manufacturer/model if better info found
+          if (device.manufacturer !== 'Unknown' && existing.manufacturer === 'Unknown') {
+            existing.manufacturer = device.manufacturer;
+            existing.model = device.model;
+            existing.name = device.name;
+          }
+
+          // Update endpoint if found
+          if (device.endpoint && !existing.endpoint) {
+            existing.endpoint = device.endpoint;
+          }
         }
       }
     });
@@ -806,7 +1275,7 @@ class EnhancedOnvifDiscovery {
    * Generate UUID for SOAP messages
    */
   generateUuid() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
       const r = Math.random() * 16 | 0;
       const v = c == 'x' ? r : (r & 0x3 | 0x8);
       return v.toString(16);

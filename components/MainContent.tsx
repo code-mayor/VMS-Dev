@@ -27,6 +27,8 @@ import {
   Key,
   Database,
   Wifi,
+  WifiOff,
+  AlertCircle,
   HardDrive,
   RefreshCw
 } from 'lucide-react'
@@ -205,6 +207,85 @@ export function MainContent({
     loadDevices()
   }
 
+  function DiagnosticsTab() {
+    const [deviceHealth, setDeviceHealth] = useState<any[]>([])
+    const [loading, setLoading] = useState(true)
+
+    useEffect(() => {
+      loadHealthData()
+      const interval = setInterval(loadHealthData, 10000)
+      return () => clearInterval(interval)
+    }, [])
+
+    const loadHealthData = async () => {
+      try {
+        const response = await fetch('http://localhost:3001/api/health/devices')
+        if (response.ok) {
+          const data = await response.json()
+          setDeviceHealth(data.devices || [])
+        }
+      } catch (error) {
+        console.error('Failed to load health data:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    return (
+      <div className="p-6">
+        <h2 className="text-2xl font-bold mb-4">Device Diagnostics</h2>
+
+        {loading ? (
+          <div>Loading diagnostics...</div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {deviceHealth.map(device => (
+              <Card key={device.id}>
+                <CardHeader>
+                  <CardTitle className="flex items-center justify-between">
+                    <span>{device.name}</span>
+                    <Badge variant={
+                      device.health === 'healthy' ? 'default' :
+                        device.health === 'degraded' ? 'secondary' : 'destructive'
+                    }>
+                      {device.health}
+                    </Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span>IP Address:</span>
+                      <span className="font-mono">{device.ip}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Network:</span>
+                      <Badge variant={device.network === 'reachable' ? 'outline' : 'destructive'}>
+                        {device.network}
+                      </Badge>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>RTSP Port:</span>
+                      <Badge variant={device.rtsp === 'open' ? 'outline' : 'secondary'}>
+                        {device.rtsp}
+                      </Badge>
+                    </div>
+                    {device.latency && (
+                      <div className="flex justify-between">
+                        <span>Latency:</span>
+                        <span>{device.latency}ms</span>
+                      </div>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
   // Get device statistics
   const deviceStats = {
     total: devices.length,
@@ -272,6 +353,9 @@ export function MainContent({
 
     case 'health-check':
       return <HealthCheckTab deviceStats={deviceStats} />
+
+    case 'diagnostics':
+      return <DiagnosticsTab />
 
     case 'settings':
       return <SettingsTab />

@@ -18,6 +18,8 @@ try {
 const { DatabaseMigration } = require('./utils/database-migration');
 const { seedDatabase } = require('./utils/seed-database');
 
+const serverInitializer = require('./server-init')
+
 // Database configuration class for dual support
 class DatabaseAdapter {
   constructor() {
@@ -222,6 +224,7 @@ process.on('uncaughtException', (error) => {
 // Create required directories if they don't exist
 const createDirectories = () => {
   const dirs = [
+    path.join(__dirname, 'public'),
     path.join(__dirname, 'public', 'hls'),
     path.join(__dirname, 'public', 'recordings'),
     path.join(__dirname, 'data'),
@@ -230,9 +233,21 @@ const createDirectories = () => {
 
   const fs = require('fs');
   dirs.forEach(dir => {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-      logger.info('Created directory:', dir);
+    try {
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+        logger.info(`✅ Created directory: ${dir}`);
+      } else {
+        // Verify write access
+        fs.accessSync(dir, fs.constants.W_OK);
+        logger.info(`✅ Verified directory: ${dir}`);
+      }
+    } catch (error) {
+      logger.error(`❌ Directory error for ${dir}: ${error.message}`);
+      // Don't stop server, but warn about potential issues
+      if (dir.includes('recordings')) {
+        logger.warn('⚠️ Recordings may fail without write access to recordings directory');
+      }
     }
   });
 };
@@ -592,6 +607,10 @@ const startServer = async () => {
     logger.info('🔄 Initializing database schema...');
     await initializeDatabase();
 
+    // Initialize auto-recording environment
+    logger.info('🚀 Initializing auto-recording environment...')
+    await serverInitializer.initialize()
+
     // Step 4: Create Express app and HTTP server for WebRTC support
     logger.info('🌐 Setting up Express application with WebRTC support...');
     const app = express();
@@ -632,6 +651,7 @@ const startServer = async () => {
       const healthRoutes = require('./routes/health');
       const streamRoutes = require('./routes/streams');
       const recordingRoutes = require('./routes/recordings');
+      const ptzRoutes = require('./routes/ptz');
       const motionRoutes = require('./routes/motion');
       const auditRoutes = require('./routes/audit');
 
@@ -642,11 +662,177 @@ const startServer = async () => {
       app.use('/api/health', healthRoutes);
       app.use('/api/streams', streamRoutes);
       app.use('/api/recordings', recordingRoutes);
+      app.use('/api/ptz', ptzRoutes);
       app.use('/api/motion', motionRoutes);
       app.use('/api/audit', auditRoutes);
 
-      // Setup HLS streaming routes
-      app.use('/hls', streamRoutes);
+      // // Setup HLS streaming routes
+      // app.use('/hls', streamRoutes);
+
+      // Auto-start streams for authenticated devices
+      const setupAutoStreaming = async () => {
+        setTimeout(async () => {
+          try {
+            const streamManager = require('./services/stream-manager');
+            logger.info('🎥 Checking for authenticated devices to auto-start streams...');
+
+            const devices = await dbAdapter.all('SELECT * FROM devices WHERE authenticated = 1');
+
+            if (devices && devices.length > 0) {
+              logger.info(`📷 Found ${devices.length} authenticated device(s)`);
+
+              for (const device of devices) {
+                if (!device.rtsp_username || !device.rtsp_password) {
+                  logger.warn(`⚠️ Skipping ${device.name} - missing RTSP credentials`);
+                  continue;
+                }
+
+                // Check device connectivity before attempting stream
+                try {
+                  const { exec } = require('child_process');
+                  const util = require('util');
+                  const execPromise = util.promisify(exec);
+
+                  // Quick connectivity check
+                  const { stdout } = await execPromise(`ping -c 1 -W 1 ${device.ip_address}`);
+
+                  if (!stdout.includes('1 received')) {
+                    logger.warn(`⚠️ Device ${device.name} (${device.ip_address}) is unreachable - skipping auto-start`);
+                    continue;
+                  }
+
+                  logger.info(`🎬 Auto-starting stream for ${device.name} at ${device.ip_address}`);
+                  await streamManager.startStreamForDevice(device);
+                  logger.info(`✅ Auto-started stream for ${device.name}`);
+
+                } catch (err) {
+                  logger.warn(`⚠️ Failed to auto-start stream for ${device.name}: ${err.message}`);
+                }
+
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              }
+
+              logger.info(`🎥 Auto-start completed for authenticated devices`);
+            } else {
+              logger.info('📷 No authenticated devices found for auto-streaming');
+            }
+          } catch (error) {
+            logger.error('❌ Failed to auto-start streams:', error);
+          }
+        }, 10000);
+      };
+
+      setupAutoStreaming();
+
+      // Periodic device health monitoring
+      // const setupHealthMonitoring = () => {
+      //   setInterval(async () => {
+      //     try {
+      //       const devices = await dbAdapter.all('SELECT * FROM devices WHERE authenticated = 1');
+
+      //       for (const device of devices) {
+      //         const { exec } = require('child_process');
+      //         const util = require('util');
+      //         const execPromise = util.promisify(exec);
+
+      //         try {
+      //           const { stdout } = await execPromise(`ping -c 1 -W 1 ${device.ip_address}`);
+      //           const isReachable = stdout.includes('1 received');
+
+      //           // Update device status in database
+      //           const newStatus = isReachable ? 'online' : 'offline';
+      //           const currentStatus = device.status;
+
+      //           if (newStatus !== currentStatus) {
+      //             await dbAdapter.run(
+      //               'UPDATE devices SET status = ?, last_seen = ? WHERE id = ?',
+      //               [newStatus, new Date().toISOString(), device.id]
+      //             );
+
+      //             // Log status change
+      //             if (newStatus === 'offline') {
+      //               logger.error(`🔴 ALERT: Device ${device.name} (${device.ip_address}) went OFFLINE`);
+      //             } else {
+      //               logger.info(`🟢 Device ${device.name} (${device.ip_address}) is back ONLINE`);
+      //             }
+      //           }
+      //         } catch (error) {
+      //           // Device unreachable
+      //           if (device.status !== 'offline') {
+      //             await dbAdapter.run(
+      //               'UPDATE devices SET status = ? WHERE id = ?',
+      //               ['offline', device.id]
+      //             );
+      //             logger.error(`🔴 ALERT: Device ${device.name} (${device.ip_address}) is OFFLINE`);
+      //           }
+      //         }
+      //       }
+      //     } catch (error) {
+      //       logger.error('Health monitoring error:', error);
+      //     }
+      //   }, 60000); // Check every minute
+      // };
+
+      // In the setupHealthMonitoring function in index.js
+      const setupHealthMonitoring = () => {
+        setInterval(async () => {
+          try {
+            const devices = await dbAdapter.all('SELECT * FROM devices WHERE authenticated = 1');
+
+            for (const device of devices) {
+              try {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 3000);
+
+                const response = await fetch(`http://${device.ip_address}:${device.port || 80}`, {
+                  method: 'HEAD',
+                  signal: controller.signal
+                });
+
+                clearTimeout(timeout);
+
+                const isReachable = response.ok || response.status === 401 || response.status === 403;
+                const newStatus = isReachable ? 'online' : 'offline';
+
+                if (newStatus !== device.status) {
+                  await dbAdapter.run(
+                    'UPDATE devices SET status = ?, last_seen = ? WHERE id = ?',
+                    [newStatus, new Date().toISOString(), device.id]
+                  );
+
+                  logger.info(`Device ${device.name} is now ${newStatus.toUpperCase()}`);
+                }
+              } catch (error) {
+                // Device unreachable
+                if (device.status !== 'offline') {
+                  await dbAdapter.run(
+                    'UPDATE devices SET status = ? WHERE id = ?',
+                    ['offline', device.id]
+                  );
+                }
+              }
+            }
+          } catch (error) {
+            logger.error('Health monitoring error:', error);
+          }
+        }, 60000); // Check every minute
+      };
+
+      // Call after server starts
+      setupHealthMonitoring();
+
+      // Serve static files for HLS streaming with proper headers
+      app.use('/hls', express.static(path.join(__dirname, 'public/hls'), {
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.m3u8')) {
+            res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          } else if (filePath.endsWith('.ts')) {
+            res.setHeader('Content-Type', 'video/mp2t');
+            res.setHeader('Cache-Control', 'max-age=3600');
+          }
+        }
+      }));
 
       // WebRTC signaling with Socket.IO for real-time communication
       const { Server } = require('socket.io');
@@ -684,23 +870,23 @@ const startServer = async () => {
             const mockAnswer = {
               type: 'answer',
               sdp: `v=0\r
-o=- ${Date.now()} ${Date.now()} IN IP4 ${device.ip_address}\r
-s=ONVIF WebRTC Stream\r
-t=0 0\r
-a=group:BUNDLE 0\r
-m=video 9 UDP/TLS/RTP/SAVPF 96\r
-c=IN IP4 ${device.ip_address}\r
-a=rtcp:9 IN IP4 ${device.ip_address}\r
-a=ice-ufrag:webrtc${Date.now().toString(36)}\r
-a=ice-pwd:webrtc${Math.random().toString(36)}\r
-a=fingerprint:sha-256 ${Array.from({ length: 32 }, () => Math.floor(Math.random() * 256).toString(16).padStart(2, '0')).join(':').toUpperCase()}\r
-a=setup:active\r
-a=mid:0\r
-a=sendonly\r
-a=rtcp-mux\r
-a=rtpmap:96 H264/90000\r
-a=fmtp:96 profile-level-id=42e01e\r
-`
+              o=- ${Date.now()} ${Date.now()} IN IP4 ${device.ip_address}\r
+              s=ONVIF WebRTC Stream\r
+              t=0 0\r
+              a=group:BUNDLE 0\r
+              m=video 9 UDP/TLS/RTP/SAVPF 96\r
+              c=IN IP4 ${device.ip_address}\r
+              a=rtcp:9 IN IP4 ${device.ip_address}\r
+              a=ice-ufrag:webrtc${Date.now().toString(36)}\r
+              a=ice-pwd:webrtc${Math.random().toString(36)}\r
+              a=fingerprint:sha-256 ${Array.from({ length: 32 }, () => Math.floor(Math.random() * 256).toString(16).padStart(2, '0')).join(':').toUpperCase()}\r
+              a=setup:active\r
+              a=mid:0\r
+              a=sendonly\r
+              a=rtcp-mux\r
+              a=rtpmap:96 H264/90000\r
+              a=fmtp:96 profile-level-id=42e01e\r
+              `
             };
 
             socket.emit('webrtc-answer', mockAnswer);
@@ -829,6 +1015,15 @@ a=fmtp:96 profile-level-id=42e01e\r
         logger.info(`💾 SQLite Database: ${path.join(__dirname, 'onvif_vms.db')}`);
       }
       logger.info(`🔧 Node.js: ${process.version}`);
+
+      setTimeout(async () => {
+        try {
+          logger.info('🎬 Checking auto-recording settings...')
+          await serverInitializer.startAutoRecordingsIfEnabled(dbAdapter)
+        } catch (error) {
+          logger.error('❌ Failed to initialize auto-recordings:', error)
+        }
+      }, 8000) // Wait 8 seconds for server to be fully ready
 
       console.log('\n🎯 ONVIF Video Management System is ready!');
       console.log('┌────────────────────────────────────────────────┐');

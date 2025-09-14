@@ -749,22 +749,6 @@ router.get('/status', async (req, res) => {
         }
       });
 
-
-      res.json({
-        success: true,
-        user: {
-          id: user.id,
-          email: user.email,
-          name: user.name,
-          role: user.role,
-          permissions: permissions,
-          session_timeout: 3600,
-          last_activity: nowIso,
-          created_at: user.created_at,
-          last_login: user.last_login
-        }
-      });
-
     } catch (tokenError) {
       return res.status(401).json({
         success: false,
@@ -774,7 +758,7 @@ router.get('/status', async (req, res) => {
 
   } catch (error) {
     logger.error('Auth status error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: 'Failed to check auth status'
     });

@@ -2,54 +2,95 @@
   "compilerOptions": {
     "target": "ES2020",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2020",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "module": "ESNext",
     "skipLibCheck": true,
     "allowJs": true,
-
+    "moduleResolution": "node",
     /* Bundler mode */
-    "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
-
-    /* Linting */
+    /* Module interop for hls.js and other libraries */
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    /* Type checking */
     "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
-    "allowSyntheticDefaultImports": true,
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-
+    /* Type acquisition */
+    "types": [
+      "node",
+      "react",
+      "react-dom"
+    ],
+    "typeRoots": [
+      "./node_modules/@types",
+      "./types"
+    ],
     /* Path mapping */
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"],
-      "@/components/*": ["./components/*"],
-      "@/ui/*": ["./components/ui/*"],
-      "@/utils/*": ["./utils/*"],
-      "@/services/*": ["./services/*"],
-      "@/types/*": ["./types/*"],
-      "@/hooks/*": ["./hooks/*"]
+      "@/*": [
+        "./src/*"
+      ],
+      "@/components/*": [
+        "./src/components/*"
+      ],
+      "@/ui/*": [
+        "./src/components/ui/*"
+      ],
+      "@/utils/*": [
+        "./src/utils/*"
+      ],
+      "@/services/*": [
+        "./src/services/*"
+      ],
+      "@/types/*": [
+        "./src/types/*"
+      ],
+      "@/hooks/*": [
+        "./src/hooks/*"
+      ]
     }
   },
   "include": [
-    "src",
-    "components",
-    "services", 
-    "utils",
-    "types",
-    "hooks",
+    "src/**/*",
+    "src/**/*.tsx",
+    "src/**/*.ts",
+    "src/**/*.jsx",
+    "src/**/*.js",
+    "components/**/*",
+    "services/**/*",
+    "utils/**/*",
+    "types/**/*",
+    "hooks/**/*",
     "App.tsx",
-    "vite-env.d.ts"
+    "vite-env.d.ts",
+    "**/*.d.ts"
   ],
   "exclude": [
     "node_modules",
     "dist",
-    "server"
+    "build",
+    "server",
+    "public",
+    "**/*.spec.ts",
+    "**/*.test.ts"
   ],
-  "references": [{ "path": "./tsconfig.node.json" }]
+  "references": [
+    {
+      "path": "./tsconfig.node.json"
+    }
+  ]
 }

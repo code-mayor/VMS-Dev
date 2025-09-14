@@ -35,6 +35,9 @@ interface AuthForm {
   auto_sync: boolean
 }
 
+// Add debug mode flag - set to false in production
+const DEBUG_MODE = false
+
 export function DeviceAuthDialog({ device, open, onOpenChange, onAuthSuccess }: DeviceAuthDialogProps) {
   const [formData, setFormData] = useState<AuthForm>({
     onvif_username: '',
@@ -55,8 +58,11 @@ export function DeviceAuthDialog({ device, open, onOpenChange, onAuthSuccess }: 
   const [authResult, setAuthResult] = useState<any>(null)
 
   useEffect(() => {
-    if (open) {
-      console.log('🔐 DeviceAuthDialog opened for device:', device?.name)
+    // Only process if dialog is open AND device exists
+    if (open && device) {
+      if (DEBUG_MODE) {
+        console.log('🔓 DeviceAuthDialog opened for device:', device?.name)
+      }
       setStep('credentials')
       setError('')
       setAuthResult(null)
@@ -85,7 +91,9 @@ export function DeviceAuthDialog({ device, open, onOpenChange, onAuthSuccess }: 
 
   const handleClose = () => {
     if (!isLoading) {
-      console.log('🔐 Closing DeviceAuthDialog')
+      if (DEBUG_MODE) {
+        console.log('🔓 Closing DeviceAuthDialog')
+      }
       onOpenChange(false)
     }
   }
@@ -108,7 +116,9 @@ export function DeviceAuthDialog({ device, open, onOpenChange, onAuthSuccess }: 
       setError('')
       setStep('testing')
 
-      console.log('🔐 Starting authentication for device:', device.name)
+      if (DEBUG_MODE) {
+        console.log('🔓 Starting authentication for device:', device.name)
+      }
 
       const authData = {
         username: formData.onvif_username,
@@ -126,12 +136,15 @@ export function DeviceAuthDialog({ device, open, onOpenChange, onAuthSuccess }: 
       })
 
       const result = await response.json()
-      console.log('🔐 Authentication response:', {
-        status: response.status,
-        success: result.success,
-        hasProfiles: !!result.profiles,
-        profileCount: result.profiles?.length
-      })
+
+      if (DEBUG_MODE) {
+        console.log('🔓 Authentication response:', {
+          status: response.status,
+          success: result.success,
+          hasProfiles: !!result.profiles,
+          profileCount: result.profiles?.length
+        })
+      }
 
       if (response.ok && result.success) {
         setStep('success')
@@ -139,7 +152,9 @@ export function DeviceAuthDialog({ device, open, onOpenChange, onAuthSuccess }: 
 
         // Call success callback after a short delay - Pass only the device ID
         setTimeout(() => {
-          console.log('✅ Authentication successful, calling onAuthSuccess with device ID:', device.id)
+          if (DEBUG_MODE) {
+            console.log('✅ Authentication successful, calling onAuthSuccess with device ID:', device.id)
+          }
           onAuthSuccess(device.id)
 
           // Close dialog after callback
@@ -150,11 +165,15 @@ export function DeviceAuthDialog({ device, open, onOpenChange, onAuthSuccess }: 
 
       } else {
         const errorMessage = result.error || result.message || 'Authentication failed'
-        console.error('❌ Authentication failed:', errorMessage)
+        if (DEBUG_MODE) {
+          console.error('❌ Authentication failed:', errorMessage)
+        }
         throw new Error(errorMessage)
       }
     } catch (error: any) {
-      console.error('❌ Authentication error:', error)
+      if (DEBUG_MODE) {
+        console.error('❌ Authentication error:', error)
+      }
       setError(error.message || 'Authentication failed')
       setStep('credentials')
     } finally {
@@ -175,11 +194,23 @@ export function DeviceAuthDialog({ device, open, onOpenChange, onAuthSuccess }: 
   const copyRtspUrl = () => {
     const url = `rtsp://${formData.rtsp_username}:${formData.rtsp_password}@${device.ip_address}:554/profile1`
     navigator.clipboard.writeText(url)
-    console.log('📋 RTSP URL copied to clipboard')
+    if (DEBUG_MODE) {
+      console.log('📋 RTSP URL copied to clipboard')
+    }
   }
 
+  // Early return if no device - prevents rendering the dialog without proper data
+  // This should prevent the warning from appearing
   if (!device) {
-    console.warn('⚠️ DeviceAuthDialog: No device provided')
+    // Only show warning once when dialog attempts to open without device
+    if (open && DEBUG_MODE) {
+      console.warn('⚠️ DeviceAuthDialog: Attempted to open without device')
+    }
+    return null
+  }
+
+  // Additional check - don't render if dialog is not open
+  if (!open) {
     return null
   }
 
