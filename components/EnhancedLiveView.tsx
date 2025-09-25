@@ -8,6 +8,10 @@ import { useStreamState } from './StreamStateManager'
 import { HLSPlayer } from './HLSPlayer'
 import { PTZOverlay } from './PTZOverlay'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
+import { Slider } from './ui/slider'
+import { Switch } from './ui/switch'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
+import { io, Socket } from 'socket.io-client'
 import { toast } from 'sonner'
 import {
   Camera,
@@ -37,7 +41,16 @@ import {
   Rewind,
   Save,
   Folder,
-  Move
+  Move,
+  Activity,
+  User,
+  Cat,
+  Car,
+  X,
+  Bell,
+  BellOff,
+  Shield,
+  ShieldAlert
 } from 'lucide-react'
 
 interface Device {
@@ -51,6 +64,7 @@ interface Device {
   capabilities?: {
     ptz?: boolean
   } | string
+  motion_detection_enabled?: boolean
 }
 
 interface EnhancedLiveViewProps {
@@ -78,6 +92,40 @@ interface Screenshot {
   filename: string
 }
 
+interface MotionAlert {
+  id: string
+  deviceId: string
+  timestamp: string
+  type: string
+  confidence: number
+  alertLevel: 'high' | 'medium' | 'low'
+  summary: string
+  acknowledged: boolean
+  objects?: {
+    living?: {
+      human?: Array<{ class: string; confidence: number }>
+      animal?: Array<{ class: string; confidence: number }>
+    }
+    nonLiving?: {
+      vehicle?: Array<{ class: string; confidence: number }>
+      other?: Array<{ class: string; confidence: number }>
+    }
+  }
+}
+
+interface MotionConfig {
+  enabled: boolean
+  sensitivity: number
+  minConfidence: number
+  cooldownPeriod: number
+  enableObjectDetection: boolean
+  enableHumanDetection: boolean
+  enableAnimalDetection: boolean
+  enableVehicleDetection: boolean
+  alertSound: boolean
+  alertNotifications: boolean
+}
+
 export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRefreshDevices }: EnhancedLiveViewProps) {
   const [gridLayout, setGridLayout] = useState<'1x1' | '2x2' | '3x3' | '4x4'>('2x2')
   const [expandedDevice, setExpandedDevice] = useState<string | null>(null)
@@ -85,6 +133,12 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
   // Add PTZ control states
   const [showPTZControls, setShowPTZControls] = useState<Record<string, boolean>>({})
   const [expandedPTZ, setExpandedPTZ] = useState<Record<string, boolean>>({})
+
+  // Motion detection states
+  const [motionAlerts, setMotionAlerts] = useState<Map<string, MotionAlert>>(new Map())
+  const [deviceConfigs, setDeviceConfigs] = useState<Map<string, MotionConfig>>(new Map())
+  const [showConfigDialog, setShowConfigDialog] = useState(false)
+  const [selectedDeviceConfig, setSelectedDeviceConfig] = useState<string | null>(null)
 
   // Add null check for context
   let streamContext = null;
@@ -129,6 +183,245 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
   // Get authenticated devices for streaming
   const authenticatedDevices = devices.filter(d => d.authenticated)
 
+  // Initialize device motion configurations
+  useEffect(() => {
+    const configs = new Map<string, MotionConfig>()
+    authenticatedDevices.forEach(device => {
+      configs.set(device.id, {
+        enabled: device.motion_detection_enabled || false,
+        sensitivity: 75,
+        minConfidence: 60,
+        cooldownPeriod: 5000,
+        enableObjectDetection: true,
+        enableHumanDetection: true,
+        enableAnimalDetection: true,
+        enableVehicleDetection: true,
+        alertSound: true,
+        alertNotifications: true
+      })
+    })
+    setDeviceConfigs(configs)
+  }, [devices])
+
+  const socketRef = useRef<Socket | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  // Connect to motion detection WebSocket
+  useEffect(() => {
+    connectToMotionWebSocket()
+
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect()
+        socketRef.current = null
+      }
+    }
+  }, []) // Empty dependency array is fine for initial connection
+
+  // Separate effect to handle device subscriptions when they change
+  useEffect(() => {
+    if (socketRef.current && socketRef.current.connected) {
+      // Subscribe to new devices
+      authenticatedDevices.forEach(device => {
+        socketRef.current!.emit('subscribe-device', device.id)
+      })
+    }
+  }, [authenticatedDevices]) // Re-subscribe when devices change
+
+  const connectToMotionWebSocket = () => {
+    try {
+      const socket = io('http://localhost:3001', {
+        transports: ['websocket', 'polling'],
+        auth: {
+          token: localStorage.getItem('token') || ''
+        }
+      })
+
+      socket.on('connect', () => {
+        console.log('Connected to motion detection Socket.IO')
+
+        // Authenticate
+        socket.emit('authenticate', {
+          userId: localStorage.getItem('userId') || 'local-user',
+          token: localStorage.getItem('token') || ''
+        })
+      })
+
+      socket.on('auth-success', () => {
+        console.log('Motion detection authenticated')
+
+        // Subscribe to currently authenticated devices
+        authenticatedDevices.forEach(device => {
+          socket.emit('subscribe-device', device.id)
+        })
+      })
+
+      socket.on('motion-alert', (data) => {
+        handleMotionAlert(data)
+      })
+
+      socket.on('error', (error) => {
+        console.error('Socket.IO error:', error)
+      })
+
+      socket.on('disconnect', () => {
+        console.log('Socket.IO connection closed')
+        // Auto-reconnect is handled by Socket.IO client by default
+      })
+
+      socketRef.current = socket
+    } catch (error) {
+      console.error('Failed to connect to Socket.IO:', error)
+      // Retry connection after 5 seconds
+      setTimeout(connectToMotionWebSocket, 5000)
+    }
+  }
+
+  const handleMotionAlert = (alert: any) => {
+    const motionAlert: MotionAlert = {
+      id: `alert-${Date.now()}`,
+      deviceId: alert.deviceId,
+      timestamp: alert.timestamp,
+      type: alert.type,
+      confidence: alert.confidence,
+      alertLevel: alert.alertLevel,
+      summary: alert.summary || 'Motion detected',
+      acknowledged: false,
+      objects: alert.objects
+    }
+
+    setMotionAlerts(prev => {
+      const newAlerts = new Map(prev)
+      newAlerts.set(alert.deviceId, motionAlert)
+      return newAlerts
+    })
+
+    // Play alert sound if enabled
+    const config = deviceConfigs.get(alert.deviceId)
+    if (config?.alertSound && alert.alertLevel === 'high' && audioRef.current) {
+      audioRef.current.play().catch(e => console.log('Audio play failed:', e))
+    }
+
+    // Auto-dismiss after cooldown period
+    setTimeout(() => {
+      setMotionAlerts(prev => {
+        const newAlerts = new Map(prev)
+        if (newAlerts.get(alert.deviceId)?.id === motionAlert.id) {
+          newAlerts.delete(alert.deviceId)
+        }
+        return newAlerts
+      })
+    }, config?.cooldownPeriod || 5000)
+  }
+
+  const acknowledgeAlert = (deviceId: string) => {
+    setMotionAlerts(prev => {
+      const newAlerts = new Map(prev)
+      newAlerts.delete(deviceId)
+      return newAlerts
+    })
+
+    // Send acknowledgement via Socket.IO
+    if (socketRef.current && socketRef.current.connected) {
+      const alert = motionAlerts.get(deviceId)
+      if (alert) {
+        socketRef.current.emit('acknowledge-alert', {
+          deviceId,
+          alertId: alert.id
+        })
+      }
+    }
+  }
+
+  const startMotionDetection = async (deviceId: string) => {
+    try {
+
+      // ADD THESE DEBUG LINES:
+      console.log('Starting motion detection for device:', deviceId)
+      const device = devices.find(d => d.id === deviceId)
+      console.log('Device object:', device)
+      console.log('All devices:', devices)
+
+      const config = deviceConfigs.get(deviceId)
+      const token = localStorage.getItem('token') || localStorage.getItem('vms_token') // Check both possible token keys
+
+      const response = await fetch(`http://localhost:3001/api/motion/${deviceId}/start`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ config })
+      })
+
+      if (!response.ok) throw new Error('Failed to start motion detection')
+
+      // Update config
+      setDeviceConfigs(prev => {
+        const newConfigs = new Map(prev)
+        const config = newConfigs.get(deviceId)
+        if (config) {
+          config.enabled = true
+          newConfigs.set(deviceId, config)
+        }
+        return newConfigs
+      })
+
+      toast.success('Motion detection started')
+    } catch (error) {
+      console.error('Failed to start motion detection:', error)
+      toast.error('Failed to start motion detection')
+    }
+  }
+
+  const stopMotionDetection = async (deviceId: string) => {
+    try {
+      const token = localStorage.getItem('token') || localStorage.getItem('vms_token')
+
+      await fetch(`http://localhost:3001/api/motion/${deviceId}/stop`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}` // Add this header
+        }
+      })
+
+      // Update config
+      setDeviceConfigs(prev => {
+        const newConfigs = new Map(prev)
+        const config = newConfigs.get(deviceId)
+        if (config) {
+          config.enabled = false
+          newConfigs.set(deviceId, config)
+        }
+        return newConfigs
+      })
+
+      toast.success('Motion detection stopped')
+    } catch (error) {
+      console.error('Failed to stop motion detection:', error)
+      toast.error('Failed to stop motion detection')
+    }
+  }
+
+  const updateDeviceConfig = (deviceId: string, config: Partial<MotionConfig>) => {
+    setDeviceConfigs(prev => {
+      const newConfigs = new Map(prev)
+      const currentConfig = newConfigs.get(deviceId)
+      if (currentConfig) {
+        newConfigs.set(deviceId, { ...currentConfig, ...config })
+      }
+      return newConfigs
+    })
+
+    // Send config update via Socket.IO
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit('update-motion-config', {
+        deviceId,
+        config
+      })
+    }
+  }
+
   useEffect(() => {
     const activeStreams: any[] = []
     streamStates.forEach((state, deviceId) => {
@@ -162,7 +455,7 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
         console.error('Failed to restore streams:', err)
       }
     }
-  }, []) // Only on mount
+  }, [])
 
   // Calculate grid size based on layout and available devices
   const getGridSize = () => {
@@ -188,33 +481,36 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
 
   // Enhanced stream management with better error handling
   const startStream = async (device: Device) => {
-    console.log(`[startStream] Starting stream for ${device.name}`)
+  console.log(`[startStream] Checking stream for ${device.name}`)
+  
+  const currentState = streamStates.get(device.id)
+  if (currentState?.status === 'connected') {
+    console.log(`[startStream] Already connected`)
+    return
+  }
 
-    const currentState = streamStates.get(device.id)
-    if (currentState?.status === 'connecting' || currentState?.status === 'connected') {
-      console.log(`[startStream] Already ${currentState.status}`)
-      return
-    }
+  // Build the expected HLS URL
+  const streamId = `${device.id}_hls`
+  const hlsUrl = `http://localhost:3001/hls/${streamId}/playlist.m3u8`
 
-    // Ensure consistent stream ID format
-    const ipForStream = device.ip_address.replace(/\./g, '-')
-    const deviceIdForStream = device.id.replace(/\./g, '-')
-    const streamId = `${deviceIdForStream}_hls`
-    const hlsUrl = `http://localhost:3001/hls/${streamId}/playlist.m3u8`
+  // Set connecting state
+  setStreamState(device.id, {
+    deviceId: device.id,
+    url: '',
+    status: 'connecting',
+    audioEnabled: false,
+    recording: false
+  })
 
-    try {
-      // Start stream on backend first
-      const response = await fetch(`http://localhost:3001/api/streams/${device.id}/start`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ quality: 'auto', profile: 'auto' })
-      })
-
-      if (!response.ok) {
-        throw new Error(`Backend failed: ${await response.text()}`)
-      }
-
-      // Update state only after backend confirms
+  try {
+    // First check if stream is already running on backend
+    console.log(`Checking if stream already exists at: ${hlsUrl}`)
+    const checkResponse = await fetch(hlsUrl, { method: 'HEAD' })
+    
+    if (checkResponse.ok) {
+      console.log(`✅ Stream already running on backend for ${device.name}`)
+      
+      // Stream exists, just connect to it
       setStreamState(device.id, {
         deviceId: device.id,
         url: hlsUrl,
@@ -222,19 +518,60 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
         audioEnabled: false,
         recording: false
       })
-
-    } catch (err: any) {
-      console.error(`Failed to start stream for ${device.name}:`, err)
-      setStreamState(device.id, {
-        deviceId: device.id,
-        url: '',
-        status: 'error',
-        audioEnabled: false,
-        recording: false,
-        error: err.message
-      })
+      
+      toast.success(`Connected to existing stream: ${device.name}`)
+      return
     }
+
+    // Stream doesn't exist, start it
+    console.log(`Stream not found, starting new stream for ${device.id}`)
+    
+    const response = await fetch(`http://localhost:3001/api/streams/${device.id}/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quality: 'auto', profile: 'auto' })
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      throw new Error(`Backend failed: ${response.status} - ${errorText}`)
+    }
+
+    const data = await response.json()
+    console.log('Backend stream response:', data)
+
+    // Use the URL from backend
+    const finalUrl = `http://localhost:3001${data.url}`
+    
+    // Wait a bit for FFmpeg to initialize
+    await new Promise(resolve => setTimeout(resolve, 2000))
+
+    // Set connected state
+    setStreamState(device.id, {
+      deviceId: device.id,
+      url: finalUrl,
+      status: 'connected',
+      audioEnabled: false,
+      recording: false
+    })
+
+    console.log(`✅ New stream started for ${device.name}`)
+    toast.success(`Stream started: ${device.name}`)
+
+  } catch (err: any) {
+    console.error(`Failed to start stream for ${device.name}:`, err)
+    setStreamState(device.id, {
+      deviceId: device.id,
+      url: '',
+      status: 'error',
+      audioEnabled: false,
+      recording: false,
+      error: err.message
+    })
+    
+    toast.error(`Stream error: ${err.message}`)
   }
+}
 
   const stopStream = async (deviceId: string) => {
     try {
@@ -444,52 +781,49 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
 
   // Auto-start streams with proper delay and sequencing
   useEffect(() => {
-    if (authenticatedDevices.length === 0) return
+    if (authenticatedDevices.length === 0) {
+      console.log('No authenticated devices to auto-start')
+      return
+    }
 
-    const checkAndRestoreStreams = async () => {
+    const autoStartStreams = async () => {
       const visibleDevices = authenticatedDevices.slice(0, getGridSize())
+      console.log(`Auto-starting streams for ${visibleDevices.length} visible devices`)
 
       for (const device of visibleDevices) {
         const currentState = streamStates.get(device.id)
 
-        // Check if stream exists on backend
-        const ipForStream = device.ip_address.replace(/\./g, '-')
-        const streamId = `onvif-${ipForStream}_hls`
-        const hlsUrl = `http://localhost:3001/hls/${streamId}/playlist.m3u8`
+        // Only start if not already connected or connecting
+        if (!currentState || currentState.status === 'stopped' || currentState.status === 'error' || currentState.status === undefined) {
+          console.log(`Auto-starting stream for ${device.name} (${device.id})`)
 
-        try {
-          const response = await fetch(hlsUrl, { method: 'HEAD' })
-          if (response.ok) {
-            // Stream is running on backend, just restore state
-            if (!currentState || currentState.status !== 'connected') {
-              console.log(`Restoring existing stream for ${device.name}`)
-              setStreamState(device.id, {
-                deviceId: device.id,
-                url: hlsUrl,
-                status: 'connected',
-                audioEnabled: currentState?.audioEnabled || false,
-                recording: currentState?.recording || false
-              })
+          try {
+            // Call the startStream function directly
+            await startStream(device)
+
+            // Wait between starting multiple streams to avoid overwhelming the backend
+            if (visibleDevices.length > 1) {
+              await new Promise(resolve => setTimeout(resolve, 2000))
             }
-          } else if (!currentState || currentState.status === 'stopped' || currentState.status === 'error') {
-            // Stream not running, start it
-            console.log(`Starting new stream for ${device.name}`)
-            await startStream(device)
-            await new Promise(resolve => setTimeout(resolve, 3000))
+          } catch (error) {
+            console.error(`Failed to auto-start stream for ${device.name}:`, error)
           }
-        } catch (err) {
-          // Backend check failed, try starting if not already connected
-          if (!currentState || currentState.status === 'stopped' || currentState.status === 'error') {
-            await startStream(device)
-            await new Promise(resolve => setTimeout(resolve, 3000))
-          }
+        } else {
+          console.log(`Stream already ${currentState.status} for ${device.name}`)
         }
       }
     }
 
-    const timer = setTimeout(checkAndRestoreStreams, 500) // Quick check on mount
-    return () => clearTimeout(timer)
-  }, [gridLayout, authenticatedDevices.length])
+    // Delay initial auto-start to ensure component is fully mounted
+    const timer = setTimeout(() => {
+      console.log('Component mounted, triggering auto-start...')
+      autoStartStreams()
+    }, 1500)
+
+    return () => {
+      clearTimeout(timer)
+    }
+  }, [authenticatedDevices.length, gridLayout]) // Re-run when devices or layout changes
 
   // Debug: Monitor stream states
   useEffect(() => {
@@ -530,9 +864,27 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
     }
   }, [])
 
+  const getAlertIcon = (alert: MotionAlert) => {
+    if (alert.objects?.living?.human) return <User className="w-3 h-3" />
+    if (alert.objects?.living?.animal) return <Cat className="w-3 h-3" />
+    if (alert.objects?.nonLiving?.vehicle) return <Car className="w-3 h-3" />
+    return <Activity className="w-3 h-3" />
+  }
+
+  const getAlertColor = (level: string) => {
+    switch (level) {
+      case 'high': return 'bg-red-500'
+      case 'medium': return 'bg-orange-500'
+      case 'low': return 'bg-yellow-500'
+      default: return 'bg-gray-500'
+    }
+  }
+
   const renderStreamTile = (device: Device, index: number) => {
     const streamState = streamStates.get(device.id)
     const isExpanded = expandedDevice === device.id
+    const motionAlert = motionAlerts.get(device.id)
+    const motionConfig = deviceConfigs.get(device.id)
 
     // Check if device has PTZ capability
     const hasPTZ = (() => {
@@ -617,6 +969,34 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
             </div>
           )}
 
+          {/* Motion Alert Overlay */}
+          {motionAlert && !motionAlert.acknowledged && (
+            <div className={`absolute top-2 right-2 ${getAlertColor(motionAlert.alertLevel)} text-white p-2 rounded-lg shadow-lg animate-pulse max-w-xs z-20`}>
+              <div className="flex items-start justify-between">
+                <div className="flex items-center space-x-2">
+                  <ShieldAlert className="w-4 h-4 flex-shrink-0" />
+                  <div className="text-xs">
+                    <div className="font-semibold flex items-center space-x-1">
+                      {getAlertIcon(motionAlert)}
+                      <span>{motionAlert.summary}</span>
+                    </div>
+                    <div className="opacity-90">
+                      Confidence: {motionAlert.confidence}%
+                    </div>
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="p-0 h-5 w-5 text-white hover:bg-white/20 ml-2"
+                  onClick={() => acknowledgeAlert(device.id)}
+                >
+                  <X className="w-3 h-3" />
+                </Button>
+              </div>
+            </div>
+          )}
+
           {/* PTZ Overlay - shows when activated */}
           {hasPTZ && showPTZControls[device.id] && (
             <PTZOverlay
@@ -645,6 +1025,12 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
                   <Badge variant="outline" className="text-xs bg-blue-600/20 border-blue-400/50 text-blue-300">
                     <Move className="w-3 h-3 mr-1" />
                     PTZ
+                  </Badge>
+                )}
+                {motionConfig?.enabled && (
+                  <Badge className="bg-green-500/80 text-white text-xs">
+                    <Activity className="w-3 h-3 mr-1" />
+                    Motion
                   </Badge>
                 )}
                 {streamState?.recording && (
@@ -686,6 +1072,43 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
                     <Move className="w-3 h-3" />
                   </Button>
                 )}
+
+                {/* Motion Detection Toggle */}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    const config = deviceConfigs.get(device.id)
+                    if (config?.enabled) {
+                      stopMotionDetection(device.id)
+                    } else {
+                      startMotionDetection(device.id)
+                    }
+                  }}
+                  className={motionConfig?.enabled
+                    ? "bg-green-600/50 hover:bg-green-600/70 text-white border-green-400/20"
+                    : "bg-gray-600/50 hover:bg-gray-600/70 text-white border-gray-400/20"
+                  }
+                  title={motionConfig?.enabled ? "Disable motion detection" : "Enable motion detection"}
+                >
+                  <Activity className="w-3 h-3" />
+                </Button>
+
+                {/* Motion Settings */}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setSelectedDeviceConfig(device.id)
+                    setShowConfigDialog(true)
+                  }}
+                  className="bg-black/50 hover:bg-black/70 text-white border-white/20"
+                  title="Motion detection settings"
+                >
+                  <Settings className="w-3 h-3" />
+                </Button>
 
                 <Button
                   size="sm"
@@ -776,7 +1199,7 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
               <span>Live View Grid</span>
             </h2>
             <p className="text-sm text-gray-600 mt-1">
-              Multi-camera live streaming with expandable feeds and controls
+              Multi-camera live streaming with motion detection and AI object classification
             </p>
           </div>
 
@@ -929,6 +1352,163 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
         )}
       </div>
 
+      {/* Motion Configuration Dialog */}
+      {showConfigDialog && selectedDeviceConfig && (
+        <Dialog open={showConfigDialog} onOpenChange={setShowConfigDialog}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>
+                Motion Detection Settings - {devices.find(d => d.id === selectedDeviceConfig)?.name}
+              </DialogTitle>
+            </DialogHeader>
+
+            {(() => {
+              const config = deviceConfigs.get(selectedDeviceConfig)
+              if (!config) return null
+
+              return (
+                <Tabs defaultValue="general">
+                  <TabsList className="grid w-full grid-cols-3">
+                    <TabsTrigger value="general">General</TabsTrigger>
+                    <TabsTrigger value="detection">Detection</TabsTrigger>
+                    <TabsTrigger value="alerts">Alerts</TabsTrigger>
+                  </TabsList>
+
+                  <TabsContent value="general" className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <label>Enable Motion Detection</label>
+                      <Switch
+                        checked={config.enabled}
+                        onCheckedChange={(checked) => {
+                          updateDeviceConfig(selectedDeviceConfig, { enabled: checked })
+                          if (checked) {
+                            startMotionDetection(selectedDeviceConfig)
+                          } else {
+                            stopMotionDetection(selectedDeviceConfig)
+                          }
+                        }}
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <label>Sensitivity: {config.sensitivity}%</label>
+                      <Slider
+                        value={[config.sensitivity]}
+                        onValueChange={([value]) =>
+                          updateDeviceConfig(selectedDeviceConfig, { sensitivity: value })
+                        }
+                        min={0}
+                        max={100}
+                        step={5}
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <label>Min Confidence: {config.minConfidence}%</label>
+                      <Slider
+                        value={[config.minConfidence]}
+                        onValueChange={([value]) =>
+                          updateDeviceConfig(selectedDeviceConfig, { minConfidence: value })
+                        }
+                        min={0}
+                        max={100}
+                        step={5}
+                      />
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="detection" className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <label>Enable Object Detection</label>
+                      <Switch
+                        checked={config.enableObjectDetection}
+                        onCheckedChange={(checked) =>
+                          updateDeviceConfig(selectedDeviceConfig, { enableObjectDetection: checked })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <label className="flex items-center">
+                        <User className="w-4 h-4 mr-2" />
+                        Detect Humans
+                      </label>
+                      <Switch
+                        checked={config.enableHumanDetection}
+                        onCheckedChange={(checked) =>
+                          updateDeviceConfig(selectedDeviceConfig, { enableHumanDetection: checked })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <label className="flex items-center">
+                        <Cat className="w-4 h-4 mr-2" />
+                        Detect Animals
+                      </label>
+                      <Switch
+                        checked={config.enableAnimalDetection}
+                        onCheckedChange={(checked) =>
+                          updateDeviceConfig(selectedDeviceConfig, { enableAnimalDetection: checked })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <label className="flex items-center">
+                        <Car className="w-4 h-4 mr-2" />
+                        Detect Vehicles
+                      </label>
+                      <Switch
+                        checked={config.enableVehicleDetection}
+                        onCheckedChange={(checked) =>
+                          updateDeviceConfig(selectedDeviceConfig, { enableVehicleDetection: checked })
+                        }
+                      />
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="alerts" className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <label>Alert Sound</label>
+                      <Switch
+                        checked={config.alertSound}
+                        onCheckedChange={(checked) =>
+                          updateDeviceConfig(selectedDeviceConfig, { alertSound: checked })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <label>Push Notifications</label>
+                      <Switch
+                        checked={config.alertNotifications}
+                        onCheckedChange={(checked) =>
+                          updateDeviceConfig(selectedDeviceConfig, { alertNotifications: checked })
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <label>Cooldown Period: {config.cooldownPeriod / 1000}s</label>
+                      <Slider
+                        value={[config.cooldownPeriod / 1000]}
+                        onValueChange={([value]) =>
+                          updateDeviceConfig(selectedDeviceConfig, { cooldownPeriod: value * 1000 })
+                        }
+                        min={1}
+                        max={60}
+                        step={1}
+                      />
+                    </div>
+                  </TabsContent>
+                </Tabs>
+              )
+            })()}
+          </DialogContent>
+        </Dialog>
+      )}
+
       {/* Screenshot Gallery Dialog */}
       <Dialog open={showScreenshotGallery} onOpenChange={setShowScreenshotGallery}>
         <DialogContent className="max-w-5xl h-[85vh] flex flex-col">
@@ -1006,6 +1586,9 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Hidden audio element for alerts */}
+      <audio ref={audioRef} src="/alert-sound.mp3" />
     </div>
   )
 }

@@ -1,4 +1,3 @@
-// /server/routes/ptz.js
 // Production-grade PTZ control routes using 'onvif' package
 
 const express = require('express');
@@ -261,7 +260,7 @@ function getDbAdapter(req) {
 
 // ===================== PTZ ENDPOINTS =====================
 
-// Move camera
+// Move camera - FIXED VERSION
 router.post('/:deviceId/move', async (req, res) => {
     const { deviceId } = req.params;
     const { direction, speed = 5 } = req.body;
@@ -272,6 +271,9 @@ router.post('/:deviceId/move', async (req, res) => {
     try {
         const camera = await getCamera(deviceId, dbAdapter);
         const profileToken = await getProfileToken(camera, deviceId, dbAdapter);
+
+        // CRITICAL FIX: Set activeSource BEFORE any PTZ operation
+        camera.activeSource = { profileToken: profileToken };
 
         const velocity = { x: 0, y: 0, zoom: 0 };
         const normalizedSpeed = Math.min(Math.max(speed / 10, 0.3), 1.0);
@@ -305,10 +307,8 @@ router.post('/:deviceId/move', async (req, res) => {
         }
 
         await new Promise((resolve, reject) => {
-            camera.continuousMove({
-                profileToken: profileToken,
-                velocity: velocity
-            }, (err) => {
+            // The onvif library expects velocity directly, not wrapped in an object
+            camera.continuousMove(velocity, (err) => {
                 if (err) {
                     console.error(`[ERROR] Move failed: ${err.message}`);
                     return reject(err);
@@ -334,7 +334,7 @@ router.post('/:deviceId/move', async (req, res) => {
     }
 });
 
-// Stop camera
+// Stop camera - FIXED VERSION
 router.post('/:deviceId/stop', async (req, res) => {
     const { deviceId } = req.params;
     const dbAdapter = getDbAdapter(req);
@@ -376,7 +376,7 @@ router.post('/:deviceId/stop', async (req, res) => {
     }
 });
 
-// Zoom camera
+// Zoom camera - FIXED VERSION
 router.post('/:deviceId/zoom', async (req, res) => {
     const { deviceId } = req.params;
     const { direction, speed = 3 } = req.body;
@@ -395,6 +395,7 @@ router.post('/:deviceId/zoom', async (req, res) => {
         const zoomSpeed = direction === 'in' ? normalizedSpeed : -normalizedSpeed;
 
         await new Promise((resolve, reject) => {
+            // Pass velocity directly, not wrapped in an object with profileToken
             camera.continuousMove({
                 x: 0,
                 y: 0,
@@ -425,7 +426,7 @@ router.post('/:deviceId/zoom', async (req, res) => {
     }
 });
 
-// Home position
+// Home position - FIXED VERSION
 router.post('/:deviceId/home', async (req, res) => {
     const { deviceId } = req.params;
     const dbAdapter = getDbAdapter(req);

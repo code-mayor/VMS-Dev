@@ -29,6 +29,10 @@ class EnhancedOnvifDiscovery {
     };
 
     try {
+      // Dynamic timeout based on environment
+      this.onvifDiscoveryTimeout = parseInt(process.env.DISCOVERY_TIMEOUT) || 12000;
+      this.networkScanTimeout = parseInt(process.env.NETWORK_SCAN_TIMEOUT) || 5000;
+
       // Priority 1: Enhanced ONVIF WS-Discovery (most important)
       logger.info('📡 Priority 1: Enhanced ONVIF WS-Discovery');
       results.onvifDevices = await this.enhancedOnvifDiscovery();
@@ -92,108 +96,200 @@ class EnhancedOnvifDiscovery {
       interfaces.forEach(iface => {
         const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
         let probeCount = 0;
-        const maxProbes = 3; // More thorough probing
+        const maxProbes = parseInt(process.env.DISCOVERY_PROBE_COUNT) || 3;
 
-        socket.on('message', (msg, rinfo) => {
+        // Store discovered IPs to probe alternative ports
+        const discoveredIPs = new Set();
+
+        socket.on('message', async (msg, rinfo) => {
           try {
             const message = msg.toString('utf8');
 
+            // Track any responding IP
+            discoveredIPs.add(rinfo.address);
+
             if (this.isValidOnvifResponse(message)) {
-              logger.info(`🎯 Valid ONVIF response from ${rinfo.address}`);
+              logger.info(`🎯 Valid ONVIF response from ${rinfo.address}:${rinfo.port}`);
               const device = this.parseEnhancedOnvifResponse(message, rinfo);
+
               if (device && !devices.find(d => d.ip_address === device.ip_address)) {
                 device.network_interface = iface.name;
                 device.discovery_method = 'onvif';
-                devices.push(device);
-                logger.info(`🔹 ONVIF device discovered: ${device.name} at ${device.ip_address}`);
 
-                // Immediately try to validate ONVIF capabilities
-                this.validateOnvifDevice(device).then(validatedDevice => {
-                  if (validatedDevice) {
-                    Object.assign(device, validatedDevice);
-                    logger.info(`✅ ONVIF device validated: ${device.name}`);
-                  }
-                });
+                // Probe for actual service ports dynamically
+                const actualPort = await this.findServicePort(device.ip_address);
+                if (actualPort) {
+                  device.port = actualPort;
+                  device.endpoint = `http://${device.ip_address}:${actualPort}/onvif/device_service`;
+                }
+
+                devices.push(device);
+                logger.info(`📹 ONVIF device discovered: ${device.name} at ${device.ip_address}:${device.port || 80}`);
               }
             }
           } catch (error) {
-            logger.warn(`⚠️ Error processing ONVIF response from ${rinfo.address}:`, error.message);
+            logger.debug(`Processing response from ${rinfo.address}: ${error.message}`);
           }
         });
 
         socket.on('error', (err) => {
-          logger.warn(`⚠️ ONVIF socket error on ${iface.name}:`, err.message);
+          logger.debug(`Socket error on ${iface.name}: ${err.message}`);
         });
 
         socket.bind(0, iface.address, () => {
           try {
             socket.setBroadcast(true);
-            socket.setMulticastTTL(2); // Increase TTL for better reach
+            socket.setMulticastTTL(parseInt(process.env.MULTICAST_TTL) || 2);
             socket.setMulticastLoopback(true);
 
-            // Join ONVIF multicast group
+            // Join multicast group
             socket.addMembership('239.255.255.250', iface.address);
 
-            logger.info(`✅ ONVIF socket bound to ${iface.name} (${iface.address})`);
+            const sendProbe = () => {
+              if (probeCount >= maxProbes) {
+                // After probes, check discovered IPs for cameras on non-standard ports
+                setTimeout(async () => {
+                  for (const ip of discoveredIPs) {
+                    if (!devices.find(d => d.ip_address === ip)) {
+                      const camera = await this.probeIPForCamera(ip, iface.name);
+                      if (camera) {
+                        devices.push(camera);
+                      }
+                    }
+                  }
+                }, 1000);
+                return;
+              }
 
-            // Enhanced probe sequence with different message variations
-            const sendEnhancedProbe = () => {
-              if (probeCount >= maxProbes) return;
-
-              // Try different ONVIF probe messages for better compatibility
-              const probeMessages = [
-                this.createStandardOnvifProbe(),
-                this.createEnhancedOnvifProbe(),
-                this.createCompatibilityOnvifProbe()
-              ];
-
-              const probeMessage = probeMessages[probeCount] || probeMessages[0];
+              const probeMessage = this.createDynamicOnvifProbe(probeCount);
 
               socket.send(probeMessage, 3702, '239.255.255.250', (err) => {
                 if (!err) {
                   probeCount++;
-                  logger.info(`📡 Enhanced ONVIF probe ${probeCount}/${maxProbes} sent on ${iface.name}`);
-
-                  // Stagger probes for better response handling
-                  if (probeCount < maxProbes) {
-                    setTimeout(sendEnhancedProbe, 2000); // 2 second intervals
-                  }
-                } else {
-                  logger.warn(`⚠️ Failed to send ONVIF probe on ${iface.name}:`, err.message);
+                  logger.debug(`Probe ${probeCount}/${maxProbes} sent on ${iface.name}`);
+                  setTimeout(sendProbe, 2000);
                 }
               });
             };
 
-            // Start probing immediately
-            sendEnhancedProbe();
+            sendProbe();
 
           } catch (error) {
-            logger.warn(`⚠️ ONVIF setup failed on ${iface.name}:`, error.message);
+            logger.debug(`Setup failed on ${iface.name}: ${error.message}`);
           }
         });
 
-        // Enhanced cleanup with proper timeout
         setTimeout(() => {
           try {
             socket.close();
           } catch (error) {
-            // Ignore cleanup errors
+            // Ignore
           }
 
           completedInterfaces++;
           if (completedInterfaces === interfaces.length) {
-            logger.info(`✅ Enhanced ONVIF discovery completed. Found ${devices.length} ONVIF devices`);
+            logger.info(`✅ ONVIF discovery completed. Found ${devices.length} devices`);
             resolve(devices);
           }
         }, this.onvifDiscoveryTimeout);
       });
 
-      // Safety timeout
       setTimeout(() => {
-        logger.info(`⚡ Enhanced ONVIF discovery timeout, returning ${devices.length} devices`);
         resolve(devices);
       }, this.onvifDiscoveryTimeout + 2000);
     });
+  }
+
+  // Add method to find actual service port
+  async findServicePort(ipAddress) {
+    const commonPorts = [
+      80,    // HTTP
+      8080,  // Alt HTTP
+      81,    // Alt HTTP
+      8000,  // Alt HTTP
+      443,   // HTTPS
+      8443,  // Alt HTTPS
+      554,   // RTSP
+      8554,  // Alt RTSP
+      88,    // Some cameras
+      7000,  // Some cameras
+    ];
+
+    for (const port of commonPorts) {
+      try {
+        const response = await fetch(`http://${ipAddress}:${port}/onvif/device_service`, {
+          method: 'GET',
+          signal: AbortSignal.timeout(500)
+        });
+
+        if (response.status === 200 || response.status === 401 || response.status === 405) {
+          logger.info(`✅ Found ONVIF service on port ${port}`);
+          return port;
+        }
+      } catch (error) {
+        // Continue to next port
+      }
+    }
+
+    return null;
+  }
+
+  // Add method to probe specific IP for camera
+  async probeIPForCamera(ipAddress, interfaceName) {
+    const rtspPorts = [554, 8554, 7070, 88];
+    const httpPorts = [80, 8080, 8000, 81];
+
+    // Check RTSP ports
+    for (const port of rtspPorts) {
+      if (await this.testPort(ipAddress, port)) {
+        logger.info(`📹 Found camera service at ${ipAddress}:${port} (RTSP)`);
+        return {
+          id: `camera-${ipAddress.replace(/\./g, '-')}`,
+          name: `Camera at ${ipAddress}`,
+          ip_address: ipAddress,
+          port: httpPorts[0], // Use default HTTP port for management
+          rtsp_port: port,
+          network_interface: interfaceName,
+          discovery_method: 'port-probe',
+          status: 'discovered',
+          capabilities: { video: true, onvif: false },
+          discovered_at: new Date().toISOString(),
+          last_seen: new Date().toISOString()
+        };
+      }
+    }
+
+    return null;
+  }
+
+  // Add different probe variations
+  createDynamicOnvifProbe(iteration) {
+    const messageId = this.generateUuid();
+    const probeTypes = [
+      'tds:Device',
+      'Device',
+      'NetworkVideoTransmitter',
+      ''  // Empty type for broader discovery
+    ];
+
+    const type = probeTypes[iteration] || probeTypes[0];
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+              <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
+                <soap:Header>
+                  <wsa:Action mustUnderstand="1">http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</wsa:Action>
+                  <wsa:MessageID>uuid:${messageId}</wsa:MessageID>
+                  <wsa:ReplyTo mustUnderstand="1">
+                    <wsa:Address>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:Address>
+                  </wsa:ReplyTo>
+                  <wsa:To mustUnderstand="1">urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>
+                </soap:Header>
+                <soap:Body>
+                  <Probe xmlns="http://schemas.xmlsoap.org/ws/2005/04/discovery">
+                    ${type ? `<Types>${type}</Types>` : ''}
+                  </Probe>
+                </soap:Body>
+              </soap:Envelope>`;
   }
 
   /**

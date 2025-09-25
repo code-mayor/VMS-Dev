@@ -1,0 +1,23 @@
+{
+    "default": {
+        "sensitivity": 75,
+        "minConfidence": 60,
+        "cooldownPeriod": 5000,
+        "enableObjectDetection": true,
+        "enableHumanDetection": true,
+        "enableAnimalDetection": true,
+        "enableVehicleDetection": true
+    },
+    "alertLevels": {
+        "human": "high",
+        "animal": "medium",
+        "vehicle": "medium",
+        "unknown": "low"
+    },
+    "performance": {
+        "maxConcurrentDetections": 50,
+        "batchSize": 10,
+        "workerPoolSize": 10,
+        "detectionInterval": 500
+    }
+}

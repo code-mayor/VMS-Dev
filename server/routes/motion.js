@@ -2,9 +2,13 @@ const express = require('express');
 const router = express.Router();
 const { logger } = require('../utils/logger');
 const jwt = require('jsonwebtoken');
+const { getMotionDetectionService } = require('../services/motion-detector');
 
 // Get database connection from app
 const getDbConnection = (req) => req.app.get('dbConnection');
+
+// Get motion detection service instance
+const motionService = getMotionDetectionService();
 
 // Middleware to check authentication
 const authenticateToken = (req, res, next) => {
@@ -35,9 +39,252 @@ const authenticateToken = (req, res, next) => {
   }
 };
 
-// Get all motion events
+// Start motion detection for a device
+router.post('/:deviceId/start', authenticateToken, async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const { config } = req.body;
+
+    const dbConnection = getDbConnection(req);
+
+    // Verify device exists
+    const device = await dbConnection.get('SELECT * FROM devices WHERE id = ?', [deviceId]);
+    if (!device) {
+      return res.status(404).json({ success: false, error: 'Device not found' });
+    }
+
+    // Start motion detection
+    await motionService.startDetection(deviceId, `stream-${deviceId}`, config);
+
+    // Update device in database
+    await dbConnection.run(
+      'UPDATE devices SET motion_detection_enabled = 1 WHERE id = ?',
+      [deviceId]
+    );
+
+    logger.info(`Motion detection started for device ${deviceId} by user ${req.user.id}`);
+
+    res.json({
+      success: true,
+      message: 'Motion detection started',
+      deviceId
+    });
+  } catch (error) {
+    logger.error(`Failed to start motion detection for ${req.params.deviceId}:`, error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Stop motion detection for a device
+router.post('/:deviceId/stop', authenticateToken, async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+
+    // Stop motion detection
+    motionService.stopDetection(deviceId);
+
+    const dbConnection = getDbConnection(req);
+
+    // Update device in database
+    await dbConnection.run(
+      'UPDATE devices SET motion_detection_enabled = 0 WHERE id = ?',
+      [deviceId]
+    );
+
+    logger.info(`Motion detection stopped for device ${deviceId} by user ${req.user.id}`);
+
+    res.json({
+      success: true,
+      message: 'Motion detection stopped',
+      deviceId
+    });
+  } catch (error) {
+    logger.error(`Failed to stop motion detection for ${req.params.deviceId}:`, error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get motion detection configuration
+router.get('/:deviceId/config', authenticateToken, async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+
+    const dbConnection = getDbConnection(req);
+
+    // Get device configuration from database
+    const device = await dbConnection.get(
+      'SELECT motion_detection_enabled, motion_config FROM devices WHERE id = ?',
+      [deviceId]
+    );
+
+    if (!device) {
+      return res.status(404).json({ success: false, error: 'Device not found' });
+    }
+
+    // Get runtime config from service
+    const serviceStats = motionService.getStatistics(deviceId);
+
+    const config = {
+      enabled: Boolean(device.motion_detection_enabled),
+      sensitivity: 75,
+      minConfidence: 60,
+      cooldownPeriod: 5000,
+      enableObjectDetection: true,
+      enableHumanDetection: true,
+      enableAnimalDetection: true,
+      enableVehicleDetection: true,
+      alertSound: true,
+      alertNotifications: true,
+      ...(device.motion_config ? JSON.parse(device.motion_config) : {}),
+      ...(serviceStats?.config || {})
+    };
+
+    res.json({
+      success: true,
+      config
+    });
+  } catch (error) {
+    logger.error(`Failed to get motion config for ${req.params.deviceId}:`, error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Update motion detection configuration
+router.put('/:deviceId/config', authenticateToken, async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const config = req.body;
+
+    const dbConnection = getDbConnection(req);
+
+    // Update configuration in service
+    motionService.updateConfig(deviceId, config);
+
+    // Store configuration in database
+    await dbConnection.run(
+      'UPDATE devices SET motion_config = ? WHERE id = ?',
+      [JSON.stringify(config), deviceId]
+    );
+
+    logger.info(`Motion config updated for device ${deviceId} by user ${req.user.id}`);
+
+    res.json({
+      success: true,
+      message: 'Configuration updated successfully'
+    });
+  } catch (error) {
+    logger.error(`Failed to update motion config for ${req.params.deviceId}:`, error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get motion detection statistics for a device
+router.get('/:deviceId/stats', authenticateToken, async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const stats = motionService.getStatistics(deviceId);
+
+    if (!stats) {
+      return res.status(404).json({
+        success: false,
+        error: 'Motion detection not active for this device'
+      });
+    }
+
+    res.json({ success: true, statistics: stats });
+  } catch (error) {
+    logger.error(`Failed to get motion stats for ${req.params.deviceId}:`, error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Batch start motion detection
+router.post('/batch/start', authenticateToken, async (req, res) => {
+  try {
+    const { deviceIds, config } = req.body;
+
+    if (!Array.isArray(deviceIds) || deviceIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Device IDs array is required'
+      });
+    }
+
+    const dbConnection = getDbConnection(req);
+
+    // Start motion detection for all devices
+    await motionService.startBatchDetection(deviceIds, config);
+
+    // Update devices in database
+    const placeholders = deviceIds.map(() => '?').join(',');
+    await dbConnection.run(
+      `UPDATE devices SET motion_detection_enabled = 1 WHERE id IN (${placeholders})`,
+      deviceIds
+    );
+
+    logger.info(`Batch motion detection started for ${deviceIds.length} devices by user ${req.user.id}`);
+
+    res.json({
+      success: true,
+      message: `Motion detection started for ${deviceIds.length} devices`
+    });
+  } catch (error) {
+    logger.error('Failed to start batch motion detection:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Batch stop motion detection
+router.post('/batch/stop', authenticateToken, async (req, res) => {
+  try {
+    const { deviceIds } = req.body;
+
+    if (!Array.isArray(deviceIds) || deviceIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Device IDs array is required'
+      });
+    }
+
+    // Stop motion detection for all devices
+    deviceIds.forEach(deviceId => {
+      motionService.stopDetection(deviceId);
+    });
+
+    const dbConnection = getDbConnection(req);
+
+    // Update devices in database
+    const placeholders = deviceIds.map(() => '?').join(',');
+    await dbConnection.run(
+      `UPDATE devices SET motion_detection_enabled = 0 WHERE id IN (${placeholders})`,
+      deviceIds
+    );
+
+    logger.info(`Batch motion detection stopped for ${deviceIds.length} devices by user ${req.user.id}`);
+
+    res.json({
+      success: true,
+      message: `Motion detection stopped for ${deviceIds.length} devices`
+    });
+  } catch (error) {
+    logger.error('Failed to stop batch motion detection:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get all motion events with enhanced filtering
 router.get('/events', authenticateToken, async (req, res) => {
   try {
+    const {
+      device_id,
+      start_date,
+      end_date,
+      alert_level,
+      acknowledged,
+      limit = 100,
+      offset = 0
+    } = req.query;
+
     const dbConnection = getDbConnection(req);
 
     if (!dbConnection) {
@@ -48,7 +295,40 @@ router.get('/events', authenticateToken, async (req, res) => {
       });
     }
 
-    // Query motion events with device information using unified method
+    // Build query with filters
+    let whereConditions = [];
+    let params = [];
+
+    if (device_id) {
+      whereConditions.push('me.device_id = ?');
+      params.push(device_id);
+    }
+
+    if (start_date) {
+      whereConditions.push('me.created_at >= ?');
+      params.push(start_date);
+    }
+
+    if (end_date) {
+      whereConditions.push('me.created_at <= ?');
+      params.push(end_date);
+    }
+
+    if (alert_level) {
+      whereConditions.push('me.alert_level = ?');
+      params.push(alert_level);
+    }
+
+    if (acknowledged !== undefined) {
+      whereConditions.push('me.acknowledged = ?');
+      params.push(acknowledged === 'true' ? 1 : 0);
+    }
+
+    const whereClause = whereConditions.length > 0
+      ? `WHERE ${whereConditions.join(' AND ')}`
+      : '';
+
+    // Query motion events with device information
     const motionEvents = await dbConnection.query(`
       SELECT 
         me.id,
@@ -56,6 +336,9 @@ router.get('/events', authenticateToken, async (req, res) => {
         me.event_type,
         me.confidence,
         me.bounding_box,
+        me.object_classification,
+        me.alert_level,
+        me.summary,
         me.thumbnail_path,
         me.video_path,
         me.acknowledged,
@@ -69,13 +352,16 @@ router.get('/events', authenticateToken, async (req, res) => {
       FROM motion_events me
       LEFT JOIN devices d ON me.device_id = d.id
       LEFT JOIN users u ON me.acknowledged_by = u.id
+      ${whereClause}
       ORDER BY me.created_at DESC
-      LIMIT 100
-    `);
+      LIMIT ? OFFSET ?
+    `, [...params, parseInt(limit), parseInt(offset)]);
 
     // Parse JSON fields for each event
     const parsedEvents = motionEvents.map(event => {
       let boundingBox = null;
+      let objectClassification = null;
+
       if (event.bounding_box) {
         try {
           boundingBox = typeof event.bounding_box === 'string'
@@ -86,9 +372,20 @@ router.get('/events', authenticateToken, async (req, res) => {
         }
       }
 
+      if (event.object_classification) {
+        try {
+          objectClassification = typeof event.object_classification === 'string'
+            ? JSON.parse(event.object_classification)
+            : event.object_classification;
+        } catch (e) {
+          logger.warn(`Failed to parse object_classification for event ${event.id}`);
+        }
+      }
+
       return {
         ...event,
         bounding_box: boundingBox,
+        object_classification: objectClassification,
         acknowledged: Boolean(event.acknowledged)
       };
     });
@@ -125,7 +422,7 @@ router.get('/events/device/:deviceId', authenticateToken, async (req, res) => {
       });
     }
 
-    // Query motion events for specific device using unified method
+    // Query motion events for specific device
     const motionEvents = await dbConnection.query(`
       SELECT 
         me.*,
@@ -142,6 +439,8 @@ router.get('/events/device/:deviceId', authenticateToken, async (req, res) => {
     // Parse JSON fields
     const parsedEvents = motionEvents.map(event => {
       let boundingBox = null;
+      let objectClassification = null;
+
       if (event.bounding_box) {
         try {
           boundingBox = typeof event.bounding_box === 'string'
@@ -152,9 +451,20 @@ router.get('/events/device/:deviceId', authenticateToken, async (req, res) => {
         }
       }
 
+      if (event.object_classification) {
+        try {
+          objectClassification = typeof event.object_classification === 'string'
+            ? JSON.parse(event.object_classification)
+            : event.object_classification;
+        } catch (e) {
+          logger.warn(`Failed to parse object_classification for event ${event.id}`);
+        }
+      }
+
       return {
         ...event,
         bounding_box: boundingBox,
+        object_classification: objectClassification,
         acknowledged: Boolean(event.acknowledged)
       };
     });
@@ -189,7 +499,7 @@ router.get('/events/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    // Get single event using unified method
+    // Get single event
     const event = await dbConnection.get(`
       SELECT 
         me.*,
@@ -220,6 +530,16 @@ router.get('/events/:id', authenticateToken, async (req, res) => {
       }
     }
 
+    if (event.object_classification) {
+      try {
+        event.object_classification = typeof event.object_classification === 'string'
+          ? JSON.parse(event.object_classification)
+          : event.object_classification;
+      } catch (e) {
+        logger.warn(`Failed to parse object_classification for event ${event.id}`);
+      }
+    }
+
     event.acknowledged = Boolean(event.acknowledged);
 
     res.json({
@@ -235,7 +555,7 @@ router.get('/events/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Create new motion event
+// Create new motion event (from detection service)
 router.post('/events', authenticateToken, async (req, res) => {
   try {
     const {
@@ -243,6 +563,9 @@ router.post('/events', authenticateToken, async (req, res) => {
       event_type = 'motion',
       confidence,
       bounding_box,
+      object_classification,
+      alert_level,
+      summary,
       thumbnail_path,
       video_path
     } = req.body;
@@ -268,19 +591,42 @@ router.post('/events', authenticateToken, async (req, res) => {
     const eventId = `motion-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     const now = new Date().toISOString();
 
-    // Insert new motion event using unified method
+    // Determine alert level if not provided
+    const finalAlertLevel = alert_level || (() => {
+      if (object_classification?.living?.human) return 'high';
+      if (object_classification?.living?.animal || object_classification?.nonLiving?.vehicle) return 'medium';
+      return 'low';
+    })();
+
+    // Generate summary if not provided
+    const finalSummary = summary || (() => {
+      if (object_classification) {
+        const parts = [];
+        if (object_classification.living?.human) parts.push('Human detected');
+        if (object_classification.living?.animal) parts.push('Animal detected');
+        if (object_classification.nonLiving?.vehicle) parts.push('Vehicle detected');
+        return parts.length > 0 ? parts.join(', ') : 'Motion detected';
+      }
+      return 'Motion detected';
+    })();
+
+    // Insert new motion event
     await dbConnection.run(`
       INSERT INTO motion_events (
         id, device_id, event_type, confidence, 
-        bounding_box, thumbnail_path, video_path, 
+        bounding_box, object_classification, alert_level, summary,
+        thumbnail_path, video_path, 
         acknowledged, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       eventId,
       device_id,
       event_type,
       confidence || null,
       bounding_box ? JSON.stringify(bounding_box) : null,
+      object_classification ? JSON.stringify(object_classification) : null,
+      finalAlertLevel,
+      finalSummary,
       thumbnail_path || null,
       video_path || null,
       0, // not acknowledged
@@ -318,7 +664,7 @@ router.post('/events/:id/acknowledge', authenticateToken, async (req, res) => {
       });
     }
 
-    // Check if event exists using unified method
+    // Check if event exists
     const event = await dbConnection.get(
       'SELECT id, acknowledged FROM motion_events WHERE id = ?',
       [id]
@@ -340,7 +686,7 @@ router.post('/events/:id/acknowledge', authenticateToken, async (req, res) => {
 
     const now = new Date().toISOString();
 
-    // Update event as acknowledged using unified method
+    // Update event as acknowledged
     await dbConnection.run(`
       UPDATE motion_events 
       SET acknowledged = ?, acknowledged_by = ?, acknowledged_at = ?
@@ -387,7 +733,7 @@ router.delete('/events/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    // Check if event exists using unified method
+    // Check if event exists
     const event = await dbConnection.get(
       'SELECT id FROM motion_events WHERE id = ?',
       [id]
@@ -400,7 +746,7 @@ router.delete('/events/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    // Delete the event using unified method
+    // Delete the event
     await dbConnection.run(
       'DELETE FROM motion_events WHERE id = ?',
       [id]
@@ -454,13 +800,16 @@ router.get('/stats', authenticateToken, async (req, res) => {
       params.push(end_date);
     }
 
-    // Get statistics using unified method
+    // Get statistics
     const stats = await dbConnection.get(`
       SELECT 
         COUNT(*) as total_events,
         SUM(CASE WHEN acknowledged = 1 THEN 1 ELSE 0 END) as acknowledged_events,
         SUM(CASE WHEN acknowledged = 0 THEN 1 ELSE 0 END) as unacknowledged_events,
-        AVG(confidence) as avg_confidence
+        AVG(confidence) as avg_confidence,
+        SUM(CASE WHEN alert_level = 'high' THEN 1 ELSE 0 END) as high_alerts,
+        SUM(CASE WHEN alert_level = 'medium' THEN 1 ELSE 0 END) as medium_alerts,
+        SUM(CASE WHEN alert_level = 'low' THEN 1 ELSE 0 END) as low_alerts
       FROM motion_events
       ${whereClause}
     `, params);
@@ -472,6 +821,9 @@ router.get('/stats', authenticateToken, async (req, res) => {
         acknowledged_events: stats.acknowledged_events || 0,
         unacknowledged_events: stats.unacknowledged_events || 0,
         avg_confidence: stats.avg_confidence || 0,
+        high_alerts: stats.high_alerts || 0,
+        medium_alerts: stats.medium_alerts || 0,
+        low_alerts: stats.low_alerts || 0,
         filters: {
           device_id,
           start_date,
@@ -485,6 +837,30 @@ router.get('/stats', authenticateToken, async (req, res) => {
       success: false,
       error: 'Failed to fetch statistics'
     });
+  }
+});
+
+// Get global motion detection statistics
+router.get('/stats/all', authenticateToken, async (req, res) => {
+  try {
+    const stats = motionService.getAllStatistics();
+
+    // Get WebSocket statistics if available
+    const wsStats = req.app.get('motionWebSocketService')?.getStatistics() || {
+      activeConnections: 0,
+      subscribedDevices: 0,
+      pendingAlerts: 0,
+      totalAlerts: 0
+    };
+
+    res.json({
+      success: true,
+      motionDetection: stats,
+      websocket: wsStats
+    });
+  } catch (error) {
+    logger.error('Failed to get global motion statistics:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

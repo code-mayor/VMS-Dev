@@ -69,6 +69,41 @@ const stringifyForDb = (data, dbType) => {
   return dbType === 'mysql' ? data : JSON.stringify(data);
 };
 
+// Helper function to format datetime for MySQL/SQLite compatibility
+const formatDateTimeForDB = (date, dbType) => {
+  if (!date) return null;
+
+  // Handle various date input formats
+  let d;
+  if (date instanceof Date) {
+    d = date;
+  } else if (typeof date === 'string') {
+    d = new Date(date);
+  } else {
+    d = new Date(date);
+  }
+
+  // Validate date
+  if (isNaN(d.getTime())) {
+    logger.warn(`Invalid date provided: ${date}`);
+    return null;
+  }
+
+  if (dbType === 'mysql') {
+    // MySQL format: 'YYYY-MM-DD HH:MM:SS' (no timezone)
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const hours = String(d.getHours()).padStart(2, '0');
+    const minutes = String(d.getMinutes()).padStart(2, '0');
+    const seconds = String(d.getSeconds()).padStart(2, '0');
+
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+  }
+  // SQLite accepts ISO format
+  return d.toISOString();
+};
+
 /**
  * POST /api/devices/refresh - Force refresh devices from database
  */
@@ -141,6 +176,9 @@ router.get('/', async (req, res) => {
 /**
  * POST /api/devices/discover - Enhanced device discovery with debouncing
  */
+/**
+ * POST /api/devices/discover - Enhanced device discovery with proper merge logic
+ */
 router.post('/discover', async (req, res) => {
   try {
     logger.info('🔍 Enhanced device discovery triggered');
@@ -153,98 +191,130 @@ router.post('/discover', async (req, res) => {
     const discoveryResult = await debouncedDiscovery();
 
     if (!discoveryResult.success) {
+      // If discovery is already running, return current devices
+      const existingDevices = await dbAdapter.all('SELECT * FROM devices ORDER BY status DESC, name ASC');
       return res.json({
         success: true,
-        devices: [],
+        devices: existingDevices.map(d => ({
+          ...d,
+          capabilities: parseJsonField(d.capabilities) || {},
+          onvif_profiles: parseJsonField(d.onvif_profiles),
+          profile_assignments: parseJsonField(d.profile_assignments)
+        })),
         message: discoveryResult.message || 'Discovery process is already running',
-        discovery_methods: [
-          'ONVIF WS-Discovery',
-          'Network IP Scanning',
-          'SSDP/UPnP Discovery'
-        ]
+        discovery_methods: ['ONVIF WS-Discovery', 'Network IP Scanning', 'SSDP/UPnP Discovery']
       });
     }
 
     const discoveredDevices = discoveryResult.devices;
 
-    if (discoveredDevices.length === 0) {
-      logger.info('📡 Enhanced discovery found 0 device(s)');
-      return res.json({
-        success: true,
-        devices: [],
-        message: 'No devices discovered. Check network connectivity and ensure cameras support ONVIF/UPnP.',
-        discovery_methods: [
-          'ONVIF WS-Discovery',
-          'Network IP Scanning',
-          'SSDP/UPnP Discovery'
-        ]
-      });
-    }
+    // Get ALL existing devices for comprehensive merge
+    const existingDevices = await dbAdapter.all('SELECT * FROM devices');
+    const existingDeviceMap = new Map(
+      existingDevices.map(d => [d.ip_address, d])
+    );
 
-    // Save discovered devices to database
-    const savedDevices = [];
+    let savedCount = 0;
+    let updatedCount = 0;
+    const allDevices = [];
+    const discoveredIPs = new Set(discoveredDevices.map(d => d.ip_address));
 
-    logger.info(`🔍 Discovered devices with statuses: ${discoveredDevices.map(d => `${d.ip_address}:${d.status}`).join(', ')}`);
+    logger.info(`🔍 Processing ${discoveredDevices.length} discovered devices...`);
 
+    // Process discovered devices
     for (const device of discoveredDevices) {
-      try {
-        // Check if device already exists
-        const existing = await dbAdapter.get(
-          'SELECT id, name FROM devices WHERE ip_address = ?',
-          [device.ip_address]
-        );
+      const existing = existingDeviceMap.get(device.ip_address);
 
+      try {
         if (existing) {
-          // Update existing device
+          // Update existing device but PRESERVE authentication and settings
+          const lastSeen = formatDateTimeForDB(new Date(), dbType);
+
           const updateQuery = `
             UPDATE devices 
-            SET last_seen = ?, discovery_method = ?, network_interface = ?,
-            capabilities = ?, status = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE ip_address = ?
+            SET name = COALESCE(?, name),
+                manufacturer = COALESCE(?, manufacturer), 
+                model = COALESCE(?, model),
+                status = 'discovered',
+                last_seen = ?,
+                discovery_method = COALESCE(?, discovery_method),
+                network_interface = COALESCE(?, network_interface),
+                capabilities = COALESCE(?, capabilities),
+                updated_at = ${dbType === 'mysql' ? 'CURRENT_TIMESTAMP' : "datetime('now')"}
+            WHERE id = ?
           `;
 
-          logger.info(`📊 Updating device ${device.ip_address}: status="${device.status}", last_seen="${device.last_seen}"`);
-
           await dbAdapter.run(updateQuery, [
-            device.last_seen,
-            device.discovery_method,
-            device.network_interface,
+            device.name || null,
+            device.manufacturer || null,
+            device.model || null,
+            lastSeen,
+            device.discovery_method || null,
+            device.network_interface || null,
             stringifyForDb(device.capabilities, dbType),
-            device.status,
-            device.ip_address
+            existing.id
           ]);
 
-          savedDevices.push({
+          updatedCount++;
+
+          // Merge device data, preserving authentication
+          allDevices.push({
             ...device,
             id: existing.id,
-            name: existing.name
+            // PRESERVE these critical fields
+            authenticated: existing.authenticated,
+            username: existing.username,
+            password: existing.password,
+            rtsp_username: existing.rtsp_username,
+            rtsp_password: existing.rtsp_password,
+            onvif_profiles: existing.onvif_profiles,
+            profile_assignments: existing.profile_assignments,
+            recording_enabled: existing.recording_enabled,
+            motion_detection_enabled: existing.motion_detection_enabled,
+            // Update status
+            status: 'discovered',
+            last_seen: lastSeen
           });
-          logger.info(`✅ Updated existing device: ${device.ip_address} (ID: ${existing.id})`);
+
+          logger.info(`✅ Updated existing device: ${existing.name} (${device.ip_address})`);
+
         } else {
           // Insert new device
+          const now = formatDateTimeForDB(new Date(), dbType);
+
           const insertQuery = `
             INSERT INTO devices (
-              id, name, ip_address, port, manufacturer, model, discovery_method,
-              network_interface, status, capabilities, discovered_at, last_seen
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              id, name, ip_address, port, manufacturer, model,
+              discovery_method, network_interface, status, capabilities,
+              discovered_at, last_seen, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `;
 
           await dbAdapter.run(insertQuery, [
             device.id,
             device.name,
             device.ip_address,
-            device.port,
-            device.manufacturer,
-            device.model,
-            device.discovery_method,
-            device.network_interface,
-            device.status,
-            stringifyForDb(device.capabilities, dbType),
-            device.discovered_at,
-            device.last_seen
+            device.port || 80,
+            device.manufacturer || 'Unknown',
+            device.model || 'Unknown',
+            device.discovery_method || 'auto',
+            device.network_interface || 'unknown',
+            'discovered',
+            stringifyForDb(device.capabilities || {}, dbType),
+            now,
+            now,
+            now,
+            now
           ]);
 
-          savedDevices.push(device);
+          savedCount++;
+          allDevices.push({
+            ...device,
+            status: 'discovered',
+            discovered_at: now,
+            last_seen: now
+          });
+
           logger.info(`✅ Added new device: ${device.name} at ${device.ip_address}`);
         }
       } catch (error) {
@@ -252,14 +322,51 @@ router.post('/discover', async (req, res) => {
       }
     }
 
-    logger.info(`✅ Enhanced discovery completed. Saved ${savedDevices.length}/${discoveredDevices.length} devices`);
+    // Mark devices not found in discovery as offline
+    let offlineCount = 0;
+    for (const existing of existingDevices) {
+      if (!discoveredIPs.has(existing.ip_address)) {
+        const lastSeen = formatDateTimeForDB(new Date(), dbType);
+
+        await dbAdapter.run(
+          `UPDATE devices SET status = 'offline', last_seen = ? WHERE id = ?`,
+          [lastSeen, existing.id]
+        );
+
+        offlineCount++;
+
+        // Add to result with offline status
+        allDevices.push({
+          ...existing,
+          capabilities: parseJsonField(existing.capabilities) || {},
+          onvif_profiles: parseJsonField(existing.onvif_profiles),
+          profile_assignments: parseJsonField(existing.profile_assignments),
+          status: 'offline',
+          last_seen: lastSeen
+        });
+
+        logger.info(`📴 Marked device as offline: ${existing.name} (${existing.ip_address})`);
+      }
+    }
+
+    logger.info(`✅ Discovery complete: ${savedCount} new, ${updatedCount} updated, ${offlineCount} offline`);
+
+    // Sort devices: online first, then by name
+    allDevices.sort((a, b) => {
+      if (a.status === 'offline' && b.status !== 'offline') return 1;
+      if (a.status !== 'offline' && b.status === 'offline') return -1;
+      return (a.name || '').localeCompare(b.name || '');
+    });
 
     res.json({
       success: true,
-      devices: savedDevices,
+      devices: allDevices,
       discovered: discoveredDevices.length,
-      saved: savedDevices.length,
-      message: `Found ${discoveredDevices.length} devices using enhanced discovery methods`
+      saved: savedCount,
+      updated: updatedCount,
+      offline: offlineCount,
+      total: allDevices.length,
+      message: `Found ${discoveredDevices.length} active devices, ${allDevices.length} total in system`
     });
 
   } catch (error) {
@@ -268,6 +375,43 @@ router.post('/discover', async (req, res) => {
       success: false,
       error: 'Enhanced discovery failed',
       details: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/devices/status - Quick status check for all devices
+ */
+router.get('/status', async (req, res) => {
+  try {
+    const dbAdapter = getDbAdapter(req);
+
+    const devices = await dbAdapter.all(
+      'SELECT id, name, ip_address, status, authenticated, last_seen FROM devices ORDER BY status DESC, name ASC'
+    );
+
+    const stats = {
+      total: devices.length,
+      online: devices.filter(d => d.status === 'discovered').length,
+      offline: devices.filter(d => d.status === 'offline').length,
+      authenticated: devices.filter(d => d.authenticated).length
+    };
+
+    res.json({
+      success: true,
+      devices: devices.map(d => ({
+        ...d,
+        authenticated: Boolean(d.authenticated)
+      })),
+      stats,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    logger.error('Status check failed:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Status check failed'
     });
   }
 });

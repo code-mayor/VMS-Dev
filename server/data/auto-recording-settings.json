@@ -5,6 +5,7 @@
   "maxStorage": 30,
   "retentionPeriod": 1,
   "enabledDevices": [
-    "onvif-192-168-226-202"
+    "onvif-192-168-226-202",
+    "onvif-192-168-226-201"
   ]
 }

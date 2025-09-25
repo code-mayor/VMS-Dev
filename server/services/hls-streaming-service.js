@@ -873,61 +873,60 @@ class HLSStreamingService {
     // PRIORITY 1: Use configured profile assignments if available
     if (device.profile_assignments) {
       try {
-        const profileAssignments = JSON.parse(device.profile_assignments);
-        const enabledAssignments = profileAssignments.filter(assignment => assignment.enabled);
+        // Profile assignments are already parsed by DatabaseAdapter
+        const profileAssignments = device.profile_assignments;
 
-        // Sort by priority (higher priority first)
-        enabledAssignments.sort((a, b) => b.priority - a.priority);
+        if (Array.isArray(profileAssignments)) {
+          const enabledAssignments = profileAssignments.filter(assignment => assignment.enabled);
 
-        logger.info(`📋 Found ${enabledAssignments.length} configured profile assignment(s)`);
+          // Sort by priority (higher priority first)
+          enabledAssignments.sort((a, b) => (b.priority || 0) - (a.priority || 0));
 
-        // Add main stream profile first
-        const mainStreamProfile = enabledAssignments.find(assignment => assignment.usage === 'main-stream');
-        if (mainStreamProfile) {
-          const profileUrl = this.buildProfileRtspUrl(encodedUsername, encodedPassword, ip_address, mainStreamProfile);
-          if (profileUrl) {
-            rtspUrls.push(profileUrl);
-            logger.info(`🎯 Added main stream profile: ${mainStreamProfile.profileName}`);
-          }
-        }
+          logger.info(`📋 Found ${enabledAssignments.length} configured profile assignment(s)`);
 
-        // Add other configured profiles
-        enabledAssignments.forEach(assignment => {
-          if (assignment.usage !== 'main-stream') {
-            const profileUrl = this.buildProfileRtspUrl(encodedUsername, encodedPassword, ip_address, assignment);
+          // Add URLs from assignments
+          enabledAssignments.forEach(assignment => {
+            const profileUrl = this.buildProfileRtspUrl(
+              encodedUsername,
+              encodedPassword,
+              ip_address,
+              assignment
+            );
             if (profileUrl && !rtspUrls.includes(profileUrl)) {
               rtspUrls.push(profileUrl);
-              logger.info(`📹 Added ${assignment.usage} profile: ${assignment.profileName}`);
             }
-          }
-        });
-
+          });
+        }
       } catch (error) {
-        logger.warn(`⚠️ Failed to parse profile assignments for ${device.name}: ${error.message}`);
+        logger.warn(`⚠️ Error processing profile assignments: ${error.message}`);
       }
     }
 
     // PRIORITY 2: Use ONVIF discovered profiles if available and no assignments configured
     if (rtspUrls.length === 0 && device.onvif_profiles) {
       try {
-        const profiles = JSON.parse(device.onvif_profiles);
-        profiles.forEach(profile => {
-          if (profile.url && profile.type === 'rtsp') {
-            // Properly inject credentials into ONVIF profile URLs, avoiding duplication
-            let profileUrl = profile.url;
+        // Profiles are already parsed by DatabaseAdapter
+        const profiles = device.onvif_profiles;
 
-            // Remove any existing credentials from the URL first
-            profileUrl = profileUrl.replace(/rtsp:\/\/[^@]*@/, 'rtsp://');
+        if (Array.isArray(profiles)) {
+          profiles.forEach(profile => {
+            if (profile.url && profile.type === 'rtsp') {
+              let profileUrl = profile.url;
+              // Remove any existing credentials
+              profileUrl = profileUrl.replace(/rtsp:\/\/[^@]*@/, 'rtsp://');
+              // Inject our credentials
+              profileUrl = profileUrl.replace('rtsp://', `rtsp://${encodedUsername}:${encodedPassword}@`);
 
-            // Now inject our credentials
-            profileUrl = profileUrl.replace('rtsp://', `rtsp://${encodedUsername}:${encodedPassword}@`);
+              if (!rtspUrls.includes(profileUrl)) {
+                rtspUrls.push(profileUrl);
+              }
+            }
+          });
 
-            rtspUrls.push(profileUrl);
-            logger.info(`🔍 Added ONVIF discovered profile: ${profile.name || 'Unknown'}`);
-          }
-        });
+          logger.info(`📋 Added ${profiles.length} ONVIF profile(s)`);
+        }
       } catch (error) {
-        logger.warn(`⚠️ Failed to parse ONVIF profiles for ${device.name}: ${error.message}`);
+        logger.warn(`⚠️ Error processing ONVIF profiles: ${error.message}`);
       }
     }
 

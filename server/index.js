@@ -18,7 +18,9 @@ try {
 const { DatabaseMigration } = require('./utils/database-migration');
 const { seedDatabase } = require('./utils/seed-database');
 
-const serverInitializer = require('./server-init')
+// Import motion detection services
+const { getMotionDetectionService } = require('./services/motion-detector');
+const MotionWebSocketService = require('./services/motion-websocket');
 
 // Database configuration class for dual support
 class DatabaseAdapter {
@@ -149,6 +151,103 @@ class DatabaseAdapter {
     }
   }
 
+  async query(sql, params = []) {
+    return this.all(sql, params);
+  }
+
+  // Add a universal JSON parsing method
+  parseJson(data, fieldName = 'field') {
+    if (!data) return null;
+
+    // Already an object/array (MySQL JSON columns return objects)
+    if (typeof data === 'object') {
+      return data;
+    }
+
+    // String data (SQLite or MySQL TEXT columns)
+    if (typeof data === 'string') {
+      // Check for broken serialization
+      if (data === '[object Object]' || data === '[object Array]') {
+        logger.warn(`⚠️ Broken serialization detected in ${fieldName}`);
+        return null;
+      }
+
+      try {
+        return JSON.parse(data);
+      } catch (error) {
+        logger.debug(`Failed to parse JSON in ${fieldName}: ${error.message}`);
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  // Override the existing all() method to auto-parse JSON fields
+  async all(sql, params = []) {
+    let rows;
+    if (this.type === 'mysql') {
+      [rows] = await this.connection.execute(sql, params);
+    } else {
+      rows = await new Promise((resolve, reject) => {
+        this.connection.all(sql, params, (err, rows) => {
+          if (err) reject(err);
+          else resolve(rows);
+        });
+      });
+    }
+
+    // Auto-parse known JSON fields
+    const jsonFields = ['capabilities', 'onvif_profiles', 'profile_assignments', 'motion_config', 'permissions'];
+    return rows.map(row => {
+      for (const field of jsonFields) {
+        if (row[field] !== undefined) {
+          row[field] = this.parseJson(row[field], field);
+        }
+      }
+      return row;
+    });
+  }
+
+  // Override get() similarly
+  async get(sql, params = []) {
+    let row;
+    if (this.type === 'mysql') {
+      const [rows] = await this.connection.execute(sql, params);
+      row = rows[0];
+    } else {
+      row = await new Promise((resolve, reject) => {
+        this.connection.get(sql, params, (err, row) => {
+          if (err) reject(err);
+          else resolve(row);
+        });
+      });
+    }
+
+    if (row) {
+      const jsonFields = ['capabilities', 'onvif_profiles', 'profile_assignments', 'motion_config', 'permissions'];
+      for (const field of jsonFields) {
+        if (row[field] !== undefined) {
+          row[field] = this.parseJson(row[field], field);
+        }
+      }
+    }
+
+    return row;
+  }
+
+  // Add method to stringify for storage
+  stringifyForStorage(data) {
+    if (!data) return null;
+    if (this.type === 'mysql') {
+      // MySQL JSON columns can accept objects
+      return typeof data === 'string' ? JSON.parse(data) : data;
+    } else {
+      // SQLite needs strings
+      return typeof data === 'object' ? JSON.stringify(data) : data;
+    }
+  }
+
   close() {
     if (this.type === 'mysql' && this.pool) {
       return this.pool.end();
@@ -167,10 +266,34 @@ class DatabaseAdapter {
 // Helper function to format datetime for MySQL
 const formatDateTimeForDB = (date, dbType) => {
   if (!date) return null;
-  const d = new Date(date);
+
+  // Handle various date input formats
+  let d;
+  if (date instanceof Date) {
+    d = date;
+  } else if (typeof date === 'string') {
+    // Handle ISO string with timezone
+    d = new Date(date);
+  } else {
+    d = new Date(date);
+  }
+
+  // Validate date
+  if (isNaN(d.getTime())) {
+    console.warn(`Invalid date provided: ${date}`);
+    return null;
+  }
+
   if (dbType === 'mysql') {
-    // MySQL format: 'YYYY-MM-DD HH:MM:SS'
-    return d.toISOString().slice(0, 19).replace('T', ' ');
+    // MySQL format: 'YYYY-MM-DD HH:MM:SS' (no timezone)
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const hours = String(d.getHours()).padStart(2, '0');
+    const minutes = String(d.getMinutes()).padStart(2, '0');
+    const seconds = String(d.getSeconds()).padStart(2, '0');
+
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
   }
   // SQLite accepts ISO format
   return d.toISOString();
@@ -179,6 +302,9 @@ const formatDateTimeForDB = (date, dbType) => {
 // Global database instance
 let db = null;
 let dbAdapter = null;
+
+let motionDetectionService = null;
+let motionWebSocketService = null;
 
 // CRITICAL FIX: Add comprehensive error handling for unhandled rejections
 process.on('unhandledRejection', (reason, promise) => {
@@ -224,7 +350,6 @@ process.on('uncaughtException', (error) => {
 // Create required directories if they don't exist
 const createDirectories = () => {
   const dirs = [
-    path.join(__dirname, 'public'),
     path.join(__dirname, 'public', 'hls'),
     path.join(__dirname, 'public', 'recordings'),
     path.join(__dirname, 'data'),
@@ -233,21 +358,9 @@ const createDirectories = () => {
 
   const fs = require('fs');
   dirs.forEach(dir => {
-    try {
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
-        logger.info(`✅ Created directory: ${dir}`);
-      } else {
-        // Verify write access
-        fs.accessSync(dir, fs.constants.W_OK);
-        logger.info(`✅ Verified directory: ${dir}`);
-      }
-    } catch (error) {
-      logger.error(`❌ Directory error for ${dir}: ${error.message}`);
-      // Don't stop server, but warn about potential issues
-      if (dir.includes('recordings')) {
-        logger.warn('⚠️ Recordings may fail without write access to recordings directory');
-      }
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      logger.info('Created directory:', dir);
     }
   });
 };
@@ -320,10 +433,15 @@ const createMySQLTables = async () => {
       authenticated BOOLEAN DEFAULT FALSE,
       recording_enabled BOOLEAN DEFAULT FALSE,
       motion_detection_enabled BOOLEAN DEFAULT FALSE,
+      motion_config JSON,  -- No DEFAULT clause for JSON/TEXT
       discovered_at TIMESTAMP NULL,
       last_seen TIMESTAMP NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      onvif_profiles JSON,
+      profile_assignments JSON,
+      discovery_method VARCHAR(50),
+      network_interface VARCHAR(50)
     )`,
 
     `CREATE TABLE IF NOT EXISTS audit_logs (
@@ -359,6 +477,9 @@ const createMySQLTables = async () => {
       event_type VARCHAR(50) DEFAULT 'motion',
       confidence DECIMAL(5,2),
       bounding_box TEXT,
+      object_classification TEXT,
+      alert_level VARCHAR(50) DEFAULT 'low',
+      summary TEXT,
       thumbnail_path TEXT,
       video_path TEXT,
       acknowledged BOOLEAN DEFAULT FALSE,
@@ -376,7 +497,22 @@ const createMySQLTables = async () => {
       const tableName = query.match(/CREATE TABLE IF NOT EXISTS (\w+)/)[1];
       logger.info(`✅ MySQL table created/verified: ${tableName}`);
     } catch (error) {
-      logger.error(`Error creating MySQL table:`, error.message);
+      // Handle column already exists or other non-critical errors
+      if (error.code === 'ER_DUP_FIELDNAME' || error.code === 'ER_TABLE_EXISTS_ERROR') {
+        logger.info(`✅ Table structure exists, continuing...`);
+      } else if (error.message.includes("can't have a default value")) {
+        // Try to fix the schema by altering the column
+        logger.warn(`⚠️ Schema issue detected, attempting fix...`);
+        try {
+          const tableName = query.match(/CREATE TABLE IF NOT EXISTS (\w+)/)[1];
+          await dbAdapter.run(`ALTER TABLE ${tableName} MODIFY motion_config JSON`);
+          logger.info(`✅ Fixed ${tableName} schema`);
+        } catch (alterError) {
+          logger.info(`ℹ️ Schema already correct or manually fixed`);
+        }
+      } else {
+        logger.error(`Error creating MySQL table:`, error.message);
+      }
     }
   }
 };
@@ -419,6 +555,7 @@ const createSQLiteTables = async () => {
       authenticated INTEGER DEFAULT 0,
       recording_enabled INTEGER DEFAULT 0,
       motion_detection_enabled INTEGER DEFAULT 0,
+      motion_config TEXT DEFAULT '{}',
       discovered_at DATETIME,
       last_seen DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -458,6 +595,9 @@ const createSQLiteTables = async () => {
       event_type TEXT DEFAULT 'motion',
       confidence REAL,
       bounding_box TEXT,
+      object_classification TEXT,
+      alert_level TEXT DEFAULT 'low',
+      summary TEXT,
       thumbnail_path TEXT,
       video_path TEXT,
       acknowledged INTEGER DEFAULT 0,
@@ -479,6 +619,8 @@ const createSQLiteTables = async () => {
     }
   }
 };
+
+
 
 // Auto-discovery function
 let autoDiscoveryRunning = false;
@@ -566,7 +708,13 @@ const triggerAutoDiscovery = async () => {
 
 // Graceful shutdown
 const gracefulShutdown = async (signal) => {
-  logger.info(`\n💀 Received ${signal}. Graceful shutdown initiated...`);
+  logger.info(`\n💤 Received ${signal}. Graceful shutdown initiated...`);
+
+  // Stop motion detection service
+  if (motionDetectionService) {
+    logger.info('Stopping motion detection service...');
+    motionDetectionService.stopAllDetections();
+  }
 
   if (dbAdapter) {
     await dbAdapter.close();
@@ -607,11 +755,52 @@ const startServer = async () => {
     logger.info('🔄 Initializing database schema...');
     await initializeDatabase();
 
-    // Initialize auto-recording environment
-    logger.info('🚀 Initializing auto-recording environment...')
-    await serverInitializer.initialize()
+    // Step 4: Initialize motion detection service
+    logger.info('🎯 Initializing motion detection service...');
+    motionDetectionService = getMotionDetectionService();
 
-    // Step 4: Create Express app and HTTP server for WebRTC support
+    // Step 5: Initialize persistent streaming for authenticated devices
+    const initializePersistentStreaming = async () => {
+      try {
+        logger.info('🎥 Initializing persistent streaming for authenticated devices...');
+
+        const devices = await dbAdapter.all(
+          'SELECT * FROM devices WHERE authenticated = 1 AND rtsp_username IS NOT NULL AND rtsp_password IS NOT NULL'
+        );
+
+        if (devices.length > 0) {
+          const { HLSStreamingService } = require('./services/hls-streaming-service');
+          const hlsService = new HLSStreamingService();
+
+          for (const device of devices) {
+            try {
+              const streamId = `${device.id}_hls`;
+              const activeStreams = hlsService.getActiveStreams();
+              const isActive = activeStreams.some(s => s.streamId === streamId);
+
+              if (!isActive) {
+                logger.info(`🎬 Auto-starting persistent stream for ${device.name}`);
+                await hlsService.startStreaming(device);
+                // Stagger stream starts to avoid overwhelming the system
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              } else {
+                logger.info(`✅ Stream already active for ${device.name}`);
+              }
+            } catch (error) {
+              logger.error(`Failed to start persistent stream for ${device.name}:`, error.message);
+            }
+          }
+
+          logger.info('✅ Persistent streaming initialization completed');
+        } else {
+          logger.info('📷 No authenticated devices found for persistent streaming');
+        }
+      } catch (error) {
+        logger.error('Failed to initialize persistent streaming:', error);
+      }
+    };
+
+    // Step 6: Create Express app and HTTP server for WebRTC support
     logger.info('🌐 Setting up Express application with WebRTC support...');
     const app = express();
 
@@ -651,9 +840,9 @@ const startServer = async () => {
       const healthRoutes = require('./routes/health');
       const streamRoutes = require('./routes/streams');
       const recordingRoutes = require('./routes/recordings');
-      const ptzRoutes = require('./routes/ptz');
       const motionRoutes = require('./routes/motion');
       const auditRoutes = require('./routes/audit');
+      const ptzRoutes = require('./routes/ptz');
 
       // Setup API Routes
       app.use('/api/auth', authRoutes);
@@ -662,177 +851,12 @@ const startServer = async () => {
       app.use('/api/health', healthRoutes);
       app.use('/api/streams', streamRoutes);
       app.use('/api/recordings', recordingRoutes);
-      app.use('/api/ptz', ptzRoutes);
       app.use('/api/motion', motionRoutes);
       app.use('/api/audit', auditRoutes);
+      app.use('/api/ptz', ptzRoutes);
 
-      // // Setup HLS streaming routes
-      // app.use('/hls', streamRoutes);
-
-      // Auto-start streams for authenticated devices
-      const setupAutoStreaming = async () => {
-        setTimeout(async () => {
-          try {
-            const streamManager = require('./services/stream-manager');
-            logger.info('🎥 Checking for authenticated devices to auto-start streams...');
-
-            const devices = await dbAdapter.all('SELECT * FROM devices WHERE authenticated = 1');
-
-            if (devices && devices.length > 0) {
-              logger.info(`📷 Found ${devices.length} authenticated device(s)`);
-
-              for (const device of devices) {
-                if (!device.rtsp_username || !device.rtsp_password) {
-                  logger.warn(`⚠️ Skipping ${device.name} - missing RTSP credentials`);
-                  continue;
-                }
-
-                // Check device connectivity before attempting stream
-                try {
-                  const { exec } = require('child_process');
-                  const util = require('util');
-                  const execPromise = util.promisify(exec);
-
-                  // Quick connectivity check
-                  const { stdout } = await execPromise(`ping -c 1 -W 1 ${device.ip_address}`);
-
-                  if (!stdout.includes('1 received')) {
-                    logger.warn(`⚠️ Device ${device.name} (${device.ip_address}) is unreachable - skipping auto-start`);
-                    continue;
-                  }
-
-                  logger.info(`🎬 Auto-starting stream for ${device.name} at ${device.ip_address}`);
-                  await streamManager.startStreamForDevice(device);
-                  logger.info(`✅ Auto-started stream for ${device.name}`);
-
-                } catch (err) {
-                  logger.warn(`⚠️ Failed to auto-start stream for ${device.name}: ${err.message}`);
-                }
-
-                await new Promise(resolve => setTimeout(resolve, 2000));
-              }
-
-              logger.info(`🎥 Auto-start completed for authenticated devices`);
-            } else {
-              logger.info('📷 No authenticated devices found for auto-streaming');
-            }
-          } catch (error) {
-            logger.error('❌ Failed to auto-start streams:', error);
-          }
-        }, 10000);
-      };
-
-      setupAutoStreaming();
-
-      // Periodic device health monitoring
-      // const setupHealthMonitoring = () => {
-      //   setInterval(async () => {
-      //     try {
-      //       const devices = await dbAdapter.all('SELECT * FROM devices WHERE authenticated = 1');
-
-      //       for (const device of devices) {
-      //         const { exec } = require('child_process');
-      //         const util = require('util');
-      //         const execPromise = util.promisify(exec);
-
-      //         try {
-      //           const { stdout } = await execPromise(`ping -c 1 -W 1 ${device.ip_address}`);
-      //           const isReachable = stdout.includes('1 received');
-
-      //           // Update device status in database
-      //           const newStatus = isReachable ? 'online' : 'offline';
-      //           const currentStatus = device.status;
-
-      //           if (newStatus !== currentStatus) {
-      //             await dbAdapter.run(
-      //               'UPDATE devices SET status = ?, last_seen = ? WHERE id = ?',
-      //               [newStatus, new Date().toISOString(), device.id]
-      //             );
-
-      //             // Log status change
-      //             if (newStatus === 'offline') {
-      //               logger.error(`🔴 ALERT: Device ${device.name} (${device.ip_address}) went OFFLINE`);
-      //             } else {
-      //               logger.info(`🟢 Device ${device.name} (${device.ip_address}) is back ONLINE`);
-      //             }
-      //           }
-      //         } catch (error) {
-      //           // Device unreachable
-      //           if (device.status !== 'offline') {
-      //             await dbAdapter.run(
-      //               'UPDATE devices SET status = ? WHERE id = ?',
-      //               ['offline', device.id]
-      //             );
-      //             logger.error(`🔴 ALERT: Device ${device.name} (${device.ip_address}) is OFFLINE`);
-      //           }
-      //         }
-      //       }
-      //     } catch (error) {
-      //       logger.error('Health monitoring error:', error);
-      //     }
-      //   }, 60000); // Check every minute
-      // };
-
-      // In the setupHealthMonitoring function in index.js
-      const setupHealthMonitoring = () => {
-        setInterval(async () => {
-          try {
-            const devices = await dbAdapter.all('SELECT * FROM devices WHERE authenticated = 1');
-
-            for (const device of devices) {
-              try {
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), 3000);
-
-                const response = await fetch(`http://${device.ip_address}:${device.port || 80}`, {
-                  method: 'HEAD',
-                  signal: controller.signal
-                });
-
-                clearTimeout(timeout);
-
-                const isReachable = response.ok || response.status === 401 || response.status === 403;
-                const newStatus = isReachable ? 'online' : 'offline';
-
-                if (newStatus !== device.status) {
-                  await dbAdapter.run(
-                    'UPDATE devices SET status = ?, last_seen = ? WHERE id = ?',
-                    [newStatus, new Date().toISOString(), device.id]
-                  );
-
-                  logger.info(`Device ${device.name} is now ${newStatus.toUpperCase()}`);
-                }
-              } catch (error) {
-                // Device unreachable
-                if (device.status !== 'offline') {
-                  await dbAdapter.run(
-                    'UPDATE devices SET status = ? WHERE id = ?',
-                    ['offline', device.id]
-                  );
-                }
-              }
-            }
-          } catch (error) {
-            logger.error('Health monitoring error:', error);
-          }
-        }, 60000); // Check every minute
-      };
-
-      // Call after server starts
-      setupHealthMonitoring();
-
-      // Serve static files for HLS streaming with proper headers
-      app.use('/hls', express.static(path.join(__dirname, 'public/hls'), {
-        setHeaders: (res, filePath) => {
-          if (filePath.endsWith('.m3u8')) {
-            res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-          } else if (filePath.endsWith('.ts')) {
-            res.setHeader('Content-Type', 'video/mp2t');
-            res.setHeader('Cache-Control', 'max-age=3600');
-          }
-        }
-      }));
+      // Setup HLS streaming routes
+      app.use('/hls', streamRoutes);
 
       // WebRTC signaling with Socket.IO for real-time communication
       const { Server } = require('socket.io');
@@ -886,7 +910,7 @@ const startServer = async () => {
               a=rtcp-mux\r
               a=rtpmap:96 H264/90000\r
               a=fmtp:96 profile-level-id=42e01e\r
-              `
+`
             };
 
             socket.emit('webrtc-answer', mockAnswer);
@@ -915,6 +939,48 @@ const startServer = async () => {
 
         socket.on('disconnect', () => {
           console.log('🔌 WebRTC client disconnected:', socket.id);
+        });
+      });
+
+      // Initialize Motion WebSocket Service
+      logger.info('🎯 Initializing Motion Detection WebSocket service...');
+      motionWebSocketService = new MotionWebSocketService(io);
+      app.set('motionWebSocketService', motionWebSocketService);
+
+      // Connect motion detection events to WebSocket
+      motionDetectionService.on('motion', (alert) => {
+        logger.info(`Motion detected on device ${alert.deviceId}: ${alert.summary}`);
+
+        // Store event in database
+        const eventId = `motion-${alert.deviceId}-${Date.now()}`;
+        dbAdapter.run(`
+          INSERT INTO motion_events (
+            id, device_id, event_type, confidence, 
+            bounding_box, object_classification, alert_level, summary,
+            thumbnail_path, video_path, 
+            acknowledged, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+          eventId,
+          alert.deviceId,
+          alert.type,
+          alert.confidence,
+          alert.bounding_box ? JSON.stringify(alert.bounding_box) : null,
+          alert.objects ? JSON.stringify(alert.objects) : null,
+          alert.alertLevel,
+          alert.summary,
+          alert.thumbnailPath || null,
+          alert.videoPath || null,
+          0,
+          new Date().toISOString()
+        ]).catch(err => {
+          logger.error('Failed to store motion event:', err);
+        });
+
+        // Broadcast to WebSocket clients
+        motionWebSocketService.broadcastMotionAlert({
+          ...alert,
+          id: eventId
         });
       });
 
@@ -957,6 +1023,12 @@ const startServer = async () => {
         status: 'running',
         database: dbAdapter.type,
         timestamp: new Date().toISOString(),
+        features: {
+          motionDetection: true,
+          webrtc: true,
+          hls: true,
+          recording: true
+        },
         demo_users: [
           { email: 'admin@local.dev', role: 'admin' },
           { email: 'operator@local.dev', role: 'operator' },
@@ -1003,6 +1075,7 @@ const startServer = async () => {
       logger.info(`🚀 ONVIF VMS Server running on port ${PORT}`);
       logger.info(`📡 API available at: http://localhost:${PORT}`);
       logger.info(`🎥 HLS streams available at: http://localhost:${PORT}/hls/`);
+      logger.info(`🎯 Motion Detection service: ACTIVE`);
       logger.info(`🏥 Health check: http://localhost:${PORT}/api/health`);
       logger.info(`📚 API endpoints: http://localhost:${PORT}/`);
 
@@ -1016,24 +1089,21 @@ const startServer = async () => {
       }
       logger.info(`🔧 Node.js: ${process.version}`);
 
-      setTimeout(async () => {
-        try {
-          logger.info('🎬 Checking auto-recording settings...')
-          await serverInitializer.startAutoRecordingsIfEnabled(dbAdapter)
-        } catch (error) {
-          logger.error('❌ Failed to initialize auto-recordings:', error)
-        }
-      }, 8000) // Wait 8 seconds for server to be fully ready
-
-      console.log('\n🎯 ONVIF Video Management System is ready!');
-      console.log('┌────────────────────────────────────────────────┐');
+      console.log('\n🎯 ONVIF Video Management System with Motion Detection is ready!');
+      console.log('┌─────────────────────────────────────────────────┐');
       console.log(`│ ✅ All systems operational                      │`);
       console.log(`│ 🗄️  Database: ${dbAdapter.type.toUpperCase().padEnd(33)}│`);
-      console.log(`│ 🔍 Demo users created and ready for login      │`);
-      console.log('└────────────────────────────────────────────────┘');
+      console.log(`│ 🎯 Motion Detection: ACTIVE                     │`);
+      console.log(`│ 🔌 WebSocket Service: ACTIVE                    │`);
+      console.log(`│ 🔐 Demo users created and ready for login      │`);
+      console.log('└─────────────────────────────────────────────────┘');
 
       logger.info('✅ Server initialization completed successfully');
     });
+
+    setTimeout(() => {
+      initializePersistentStreaming();
+    }, 5000); // Wait 5 seconds after server start
 
     // Test a route immediately after server starts
     setTimeout(() => {
