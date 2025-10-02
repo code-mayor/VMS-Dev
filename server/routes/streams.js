@@ -14,14 +14,36 @@ const hlsService = new HLSStreamingService();
  */
 router.get('/', async (req, res) => {
   try {
+    // Get HLS service instance
     const activeStreams = hlsService.getActiveStreams();
+
+    // Also check filesystem directly as backup
+    const fs = require('fs');
+    const path = require('path');
+    const hlsDir = path.join(__dirname, '..', 'public', 'hls');
+
+    let filesystemStreams = 0;
+    if (fs.existsSync(hlsDir)) {
+      const dirs = fs.readdirSync(hlsDir, { withFileTypes: true })
+        .filter(dirent => dirent.isDirectory());
+
+      for (const dir of dirs) {
+        const playlistPath = path.join(hlsDir, dir.name, 'playlist.m3u8');
+        if (fs.existsSync(playlistPath)) {
+          const stats = fs.statSync(playlistPath);
+          if ((Date.now() - stats.mtime.getTime()) < 60000) {
+            filesystemStreams++;
+          }
+        }
+      }
+    }
 
     res.json({
       success: true,
       streams: activeStreams,
-      total: activeStreams.length,
-      active: activeStreams.filter(s => s.status === 'active').length,
-      hlsDir: path.join(__dirname, '..', 'public', 'hls')
+      total: Math.max(activeStreams.length, filesystemStreams),
+      active: Math.max(activeStreams.filter(s => s.status === 'active').length, filesystemStreams),
+      hlsDir: hlsDir
     });
 
   } catch (error) {
@@ -569,7 +591,7 @@ router.post('/test-ffmpeg', async (req, res) => {
       '-c:a', 'copy',  // Changed from AAC transcoding to copy
       '-f', 'hls',
       '-hls_time', '2',
-      '-hls_list_size', '6',
+      '-hls_list_size', '10',
       '-hls_flags', 'delete_segments+independent_segments',
       '-hls_segment_filename', path.join(outputDir, 'segment%03d.ts'),
       '-hls_segment_type', 'mpegts',

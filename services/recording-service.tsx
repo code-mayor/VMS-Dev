@@ -7,6 +7,31 @@ export interface AutoRecordingSettings {
   enabledDevices: string[]
 }
 
+export interface RecordingSchedule {
+  id?: string
+  name: string
+  enabled: boolean
+  daysOfWeek: number[] // 0=Sunday, 6=Saturday
+  startTime: string // HH:MM format
+  endTime: string // HH:MM format
+  quality: 'low' | 'medium' | 'high'
+  chunkDuration: number // minutes
+  deviceIds: string[] // empty = all enabled devices
+  priority: number
+  createdBy?: string
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface ScheduleConflict {
+  scheduleId: string
+  scheduleName: string
+  priority: number
+  startTime: string
+  endTime: string
+  willOverride: boolean
+}
+
 class RecordingService {
   private baseUrl = 'http://localhost:3001/api'
 
@@ -18,7 +43,6 @@ class RecordingService {
 
       if (!response.ok) {
         console.warn(`⚠️ Failed to get settings: ${response.status}, using defaults`)
-        // Return defaults if server fails
         return {
           enabled: false,
           chunkDuration: 1,
@@ -31,13 +55,10 @@ class RecordingService {
 
       const data = await response.json()
       console.log('📖 Retrieved settings:', data)
-
-      // The backend now returns settings directly, not wrapped
       return data
 
     } catch (error: any) {
       console.error('❌ Failed to get auto-recording settings:', error)
-      // Return defaults on error
       return {
         enabled: false,
         chunkDuration: 1,
@@ -58,7 +79,7 @@ class RecordingService {
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify(settings) // Send settings directly, not wrapped
+        body: JSON.stringify(settings)
       })
 
       if (!response.ok) {
@@ -68,8 +89,6 @@ class RecordingService {
 
       const data = await response.json()
       console.log('✅ Settings updated successfully:', data)
-
-      // The backend now returns settings directly
       return data
 
     } catch (error: any) {
@@ -77,6 +96,204 @@ class RecordingService {
       throw error
     }
   }
+
+  // ===== Schedule Management Methods =====
+
+  async getSchedules(page = 1, limit = 50, enabled?: boolean, deviceId?: string): Promise<{
+    schedules: RecordingSchedule[]
+    pagination: { page: number; limit: number; total: number; pages: number }
+  }> {
+    try {
+      const params = new URLSearchParams({
+        page: page.toString(),
+        limit: limit.toString()
+      })
+
+      if (enabled !== undefined) params.append('enabled', enabled.toString())
+      if (deviceId) params.append('deviceId', deviceId)
+
+      const response = await fetch(`${this.baseUrl}/schedules?${params}`)
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch schedules: ${response.status}`)
+      }
+
+      const data = await response.json()
+      return {
+        schedules: data.schedules || [],
+        pagination: data.pagination
+      }
+
+    } catch (error: any) {
+      console.error('❌ Failed to fetch schedules:', error)
+      throw error
+    }
+  }
+
+  async getSchedule(scheduleId: string): Promise<RecordingSchedule> {
+    try {
+      const response = await fetch(`${this.baseUrl}/schedules/${scheduleId}`)
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch schedule: ${response.status}`)
+      }
+
+      const data = await response.json()
+      return data.schedule
+
+    } catch (error: any) {
+      console.error('❌ Failed to fetch schedule:', error)
+      throw error
+    }
+  }
+
+  async createSchedule(schedule: Omit<RecordingSchedule, 'id' | 'createdAt' | 'updatedAt'>): Promise<RecordingSchedule> {
+    try {
+      console.log('📅 Creating schedule:', schedule)
+
+      const response = await fetch(`${this.baseUrl}/schedules`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(schedule)
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || `Failed to create schedule: ${response.status}`)
+      }
+
+      const data = await response.json()
+      console.log('✅ Schedule created:', data.schedule)
+      return data.schedule
+
+    } catch (error: any) {
+      console.error('❌ Failed to create schedule:', error)
+      throw error
+    }
+  }
+
+  async updateSchedule(scheduleId: string, updates: Partial<RecordingSchedule>): Promise<RecordingSchedule> {
+    try {
+      console.log('📝 Updating schedule:', scheduleId, updates)
+
+      const response = await fetch(`${this.baseUrl}/schedules/${scheduleId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(updates)
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || `Failed to update schedule: ${response.status}`)
+      }
+
+      const data = await response.json()
+      console.log('✅ Schedule updated:', data.schedule)
+      return data.schedule
+
+    } catch (error: any) {
+      console.error('❌ Failed to update schedule:', error)
+      throw error
+    }
+  }
+
+  async deleteSchedule(scheduleId: string): Promise<void> {
+    try {
+      console.log('🗑️ Deleting schedule:', scheduleId)
+
+      const response = await fetch(`${this.baseUrl}/schedules/${scheduleId}`, {
+        method: 'DELETE'
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || `Failed to delete schedule: ${response.status}`)
+      }
+
+      console.log('✅ Schedule deleted successfully')
+
+    } catch (error: any) {
+      console.error('❌ Failed to delete schedule:', error)
+      throw error
+    }
+  }
+
+  async checkScheduleConflicts(schedule: {
+    scheduleId?: string
+    daysOfWeek: number[]
+    startTime: string
+    endTime: string
+    deviceIds: string[]
+    priority: number
+  }): Promise<{ hasConflicts: boolean; conflicts: ScheduleConflict[] }> {
+    try {
+      const response = await fetch(`${this.baseUrl}/schedules/check-conflicts`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(schedule)
+      })
+
+      if (!response.ok) {
+        throw new Error(`Failed to check conflicts: ${response.status}`)
+      }
+
+      const data = await response.json()
+      return {
+        hasConflicts: data.hasConflicts,
+        conflicts: data.conflicts || []
+      }
+
+    } catch (error: any) {
+      console.error('❌ Failed to check conflicts:', error)
+      return { hasConflicts: false, conflicts: [] }
+    }
+  }
+
+  async getActiveSchedules(): Promise<RecordingSchedule[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/schedules/active/now`)
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch active schedules: ${response.status}`)
+      }
+
+      const data = await response.json()
+      return data.activeSchedules || []
+
+    } catch (error: any) {
+      console.error('❌ Failed to fetch active schedules:', error)
+      return []
+    }
+  }
+
+  async getScheduleLogs(scheduleId: string, page = 1, limit = 100) {
+    try {
+      const params = new URLSearchParams({
+        page: page.toString(),
+        limit: limit.toString()
+      })
+
+      const response = await fetch(`${this.baseUrl}/schedules/${scheduleId}/logs?${params}`)
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch schedule logs: ${response.status}`)
+      }
+
+      return await response.json()
+
+    } catch (error: any) {
+      console.error('❌ Failed to fetch schedule logs:', error)
+      throw error
+    }
+  }
+
+  // ===== Existing Recording Methods =====
 
   async startRecording(deviceId: string, duration: number, quality: string, type: 'manual' | 'auto' = 'manual') {
     try {

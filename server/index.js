@@ -198,7 +198,15 @@ class DatabaseAdapter {
     }
 
     // Auto-parse known JSON fields
-    const jsonFields = ['capabilities', 'onvif_profiles', 'profile_assignments', 'motion_config', 'permissions'];
+    const jsonFields = [
+      'capabilities',
+      'onvif_profiles',
+      'profile_assignments',
+      'motion_config',
+      'permissions',
+      'days_of_week',    //For schedules
+      'device_ids'       //For schedules
+    ];
     return rows.map(row => {
       for (const field of jsonFields) {
         if (row[field] !== undefined) {
@@ -225,7 +233,15 @@ class DatabaseAdapter {
     }
 
     if (row) {
-      const jsonFields = ['capabilities', 'onvif_profiles', 'profile_assignments', 'motion_config', 'permissions'];
+      const jsonFields = [
+        'capabilities',
+        'onvif_profiles',
+        'profile_assignments',
+        'motion_config',
+        'permissions',
+        'days_of_week',
+        'device_ids'
+      ];
       for (const field of jsonFields) {
         if (row[field] !== undefined) {
           row[field] = this.parseJson(row[field], field);
@@ -488,7 +504,40 @@ const createMySQLTables = async () => {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
       FOREIGN KEY (acknowledged_by) REFERENCES users(id) ON DELETE SET NULL
-    )`
+    )`,
+
+    `CREATE TABLE IF NOT EXISTS recording_schedules (
+      id VARCHAR(36) PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      enabled BOOLEAN DEFAULT TRUE,
+      days_of_week JSON NOT NULL COMMENT 'Array of days: 0=Sunday, 6=Saturday',
+      start_time TIME NOT NULL COMMENT 'Schedule start time HH:MM:SS',
+      end_time TIME NOT NULL COMMENT 'Schedule end time HH:MM:SS',
+      quality VARCHAR(50) DEFAULT 'medium',
+      chunk_duration INT DEFAULT 1 COMMENT 'Chunk duration in minutes',
+      device_ids JSON COMMENT 'Array of device IDs, empty/null = all enabled devices',
+      priority INT DEFAULT 0 COMMENT 'Higher priority wins on conflicts',
+      created_by VARCHAR(36) COMMENT 'User ID who created the schedule',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_enabled (enabled),
+      INDEX idx_priority (priority),
+      INDEX idx_days_start (start_time),
+      INDEX idx_schedule_lookup (enabled, priority DESC, start_time)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `CREATE TABLE IF NOT EXISTS schedule_logs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      schedule_id VARCHAR(36) NOT NULL,
+      device_id VARCHAR(255) NOT NULL,
+      action VARCHAR(50) NOT NULL COMMENT 'started, completed, failed, skipped',
+      recording_id VARCHAR(64) COMMENT 'Link to recordings table',
+      error_message TEXT,
+      timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_schedule_id (schedule_id),
+      INDEX idx_device_id (device_id),
+      INDEX idx_timestamp (timestamp)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
   ];
 
   for (const query of tables) {
@@ -606,7 +655,43 @@ const createSQLiteTables = async () => {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (device_id) REFERENCES devices(id),
       FOREIGN KEY (acknowledged_by) REFERENCES users(id)
-    )`
+    )`,
+
+    `CREATE TABLE IF NOT EXISTS recording_schedules (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      enabled INTEGER DEFAULT 1,
+      days_of_week TEXT NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      quality TEXT DEFAULT 'medium',
+      chunk_duration INTEGER DEFAULT 1,
+      device_ids TEXT,
+      priority INTEGER DEFAULT 0,
+      created_by TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
+
+    `CREATE INDEX IF NOT EXISTS idx_schedules_enabled ON recording_schedules(enabled)`,
+    `CREATE INDEX IF NOT EXISTS idx_schedules_priority ON recording_schedules(priority)`,
+    `CREATE INDEX IF NOT EXISTS idx_schedules_lookup ON recording_schedules(enabled, priority, start_time)`,
+
+    `CREATE TABLE IF NOT EXISTS schedule_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      schedule_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      recording_id TEXT,
+      error_message TEXT,
+      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (schedule_id) REFERENCES recording_schedules(id) ON DELETE CASCADE,
+      FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+    )`,
+
+    `CREATE INDEX IF NOT EXISTS idx_schedule_logs_schedule ON schedule_logs(schedule_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_schedule_logs_device ON schedule_logs(device_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_schedule_logs_timestamp ON schedule_logs(timestamp)`
   ];
 
   for (let i = 0; i < tableQueries.length; i++) {
@@ -759,7 +844,21 @@ const startServer = async () => {
     logger.info('🎯 Initializing motion detection service...');
     motionDetectionService = getMotionDetectionService();
 
-    // Step 5: Initialize persistent streaming for authenticated devices
+    // // Step 5: Initialize Schedule Executor
+    // logger.info('📅 Initializing Schedule Executor service...');
+    // const scheduleExecutor = require('./services/schedule-executor');
+    // const recordingsModule = require('./routes/recordings');
+
+    // // Store db connection globally for recordings module
+    // global.dbConnection = dbAdapter;
+
+    // scheduleExecutor.initialize(dbAdapter, recordingsModule);
+    // scheduleExecutor.start(30); // Check every 30 seconds
+
+    // app.set('scheduleExecutor', scheduleExecutor);
+    // logger.info('✅ Schedule Executor service started');
+
+    // Step 6: Initialize persistent streaming for authenticated devices
     const initializePersistentStreaming = async () => {
       try {
         logger.info('🎥 Initializing persistent streaming for authenticated devices...');
@@ -800,7 +899,7 @@ const startServer = async () => {
       }
     };
 
-    // Step 6: Create Express app and HTTP server for WebRTC support
+    // Step 7: Create Express app and HTTP server for WebRTC support
     logger.info('🌐 Setting up Express application with WebRTC support...');
     const app = express();
 
@@ -840,6 +939,7 @@ const startServer = async () => {
       const healthRoutes = require('./routes/health');
       const streamRoutes = require('./routes/streams');
       const recordingRoutes = require('./routes/recordings');
+      const scheduleRoutes = require('./routes/schedules');
       const motionRoutes = require('./routes/motion');
       const auditRoutes = require('./routes/audit');
       const ptzRoutes = require('./routes/ptz');
@@ -851,6 +951,7 @@ const startServer = async () => {
       app.use('/api/health', healthRoutes);
       app.use('/api/streams', streamRoutes);
       app.use('/api/recordings', recordingRoutes);
+      app.use('/api/schedules', scheduleRoutes);
       app.use('/api/motion', motionRoutes);
       app.use('/api/audit', auditRoutes);
       app.use('/api/ptz', ptzRoutes);
@@ -1015,6 +1116,20 @@ const startServer = async () => {
       throw error;
     }
 
+    // Initialize Schedule Executor AFTER routes are set up
+    logger.info('📅 Initializing Schedule Executor service...');
+    const scheduleExecutor = require('./services/schedule-executor');
+    const recordingsModule = require('./routes/recordings');
+
+    // Store db connection globally for recordings module
+    global.dbConnection = dbAdapter;
+
+    scheduleExecutor.initialize(dbAdapter, recordingsModule);
+    scheduleExecutor.start(30); // Check every 30 seconds
+
+    app.set('scheduleExecutor', scheduleExecutor);
+    logger.info('✅ Schedule Executor service started');
+
     // Root health check
     app.get('/', (req, res) => {
       res.json({
@@ -1027,7 +1142,8 @@ const startServer = async () => {
           motionDetection: true,
           webrtc: true,
           hls: true,
-          recording: true
+          recording: true,
+          schedules: true
         },
         demo_users: [
           { email: 'admin@local.dev', role: 'admin' },
@@ -1041,6 +1157,7 @@ const startServer = async () => {
           onvifProfiles: '/api/onvif-profiles',
           streams: '/api/streams',
           recordings: '/api/recordings',
+          schedules: '/api/schedules',
           motion: '/api/motion',
           audit: '/api/audit'
         }

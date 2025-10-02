@@ -79,7 +79,6 @@ export function HLSPlayer({
   const [latency, setLatency] = useState(0)
   const [bufferStalled, setBufferStalled] = useState(false)
   const [lastSegmentLoadTime, setLastSegmentLoadTime] = useState(0)
-  // const [segmentLoadCount, setSegmentLoadCount] = useState(0)
   const [lastPlayTime, setLastPlayTime] = useState(0)
   const [showMinimalLoading, setShowMinimalLoading] = useState(false)
   const [retryCount, setRetryCount] = useState(0)
@@ -98,44 +97,6 @@ export function HLSPlayer({
       return newValue
     })
   }
-
-  // const hlsConfig = {
-  //   maxBufferLength: 10,
-  //   maxBufferSize: 20 * 1024 * 1024,
-  //   maxBufferHole: 1,
-  //   startLevel: -1,
-  //   maxMaxBufferLength: 20,
-  //   liveSyncDurationCount: 3,
-  //   liveMaxLatencyDurationCount: 5,
-  //   liveDurationInfinity: false,
-  //   manifestLoadingTimeOut: 15000,
-  //   manifestLoadingMaxRetry: 10,
-  //   manifestLoadingRetryDelay: 1500,
-  //   levelLoadingTimeOut: 15000,
-  //   levelLoadingMaxRetry: 10,
-  //   levelLoadingRetryDelay: 1500,
-  //   fragLoadingTimeOut: 20000,
-  //   fragLoadingMaxRetry: 10,
-  //   fragLoadingRetryDelay: 1500,
-  //   lowLatencyMode: false,
-  //   backBufferLength: 10,
-  //   nudgeOffset: 0.1,
-  //   nudgeMaxRetry: 10,
-  //   maxSeekHole: 1,
-  //   progressive: false,
-  //   abrEwmaFastLive: 2.0,
-  //   abrEwmaSlowLive: 4.0,
-  //   abrEwmaFastVoD: 2.0,
-  //   abrEwmaSlowVoD: 4.0,
-  //   abrEwmaDefaultEstimate: 500000,
-  //   abrBandWidthFactor: 0.95,
-  //   abrBandWidthUpFactor: 0.98,
-  //   liveBackBufferLength: 4,
-  //   enableLowLatency: false,
-  //   debug: true,
-  //   enableWorker: true,
-  //   enableSoftwareAES: false
-  // }
 
   // Enhanced HLS configuration for 2-second segments with minimal loading interruptions
   const hlsConfig = {

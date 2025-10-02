@@ -261,7 +261,7 @@ class HLSStreamingService {
       '-c:a', 'copy',           // Copy audio codec  
       '-f', 'hls',
       '-hls_time', '2',         // 2-second segments
-      '-hls_list_size', '6',    // Keep 6 segments in playlist
+      '-hls_list_size', '10',    // Keep 10 segments in playlist
       '-hls_flags', 'delete_segments+independent_segments', // Clean segment management
       '-hls_segment_filename', segmentPattern,
       '-hls_segment_type', 'mpegts',
@@ -1093,10 +1093,12 @@ class HLSStreamingService {
   }
 
   /**
-   * Get all active streams
+   * Get all active streams - check both in-memory and filesystem
    */
   getAllActiveStreams() {
     const streams = [];
+
+    // First check in-memory streams
     for (const [streamId, streamInfo] of this.activeStreams) {
       streams.push({
         streamId,
@@ -1107,6 +1109,45 @@ class HLSStreamingService {
         audioDisabled: streamInfo.audioDisabled || false
       });
     }
+
+    // If no in-memory streams, check filesystem for orphaned streams
+    if (streams.length === 0) {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+
+        if (fs.existsSync(this.hlsOutputDir)) {
+          const dirs = fs.readdirSync(this.hlsOutputDir, { withFileTypes: true })
+            .filter(dirent => dirent.isDirectory());
+
+          for (const dir of dirs) {
+            const playlistPath = path.join(this.hlsOutputDir, dir.name, 'playlist.m3u8');
+
+            if (fs.existsSync(playlistPath)) {
+              const stats = fs.statSync(playlistPath);
+              // Consider active if modified in last 60 seconds
+              const isActive = (Date.now() - stats.mtime.getTime()) < 60000;
+
+              if (isActive) {
+                // Extract device info from directory name
+                const deviceId = dir.name.replace('_hls', '');
+                streams.push({
+                  streamId: dir.name,
+                  deviceName: `Device ${deviceId}`,
+                  deviceId: deviceId,
+                  startTime: stats.birthtime,
+                  status: 'active',
+                  audioDisabled: false
+                });
+              }
+            }
+          }
+        }
+      } catch (error) {
+        logger.warn('Failed to check filesystem for streams:', error);
+      }
+    }
+
     return streams;
   }
 
@@ -1161,10 +1202,73 @@ class HLSStreamingService {
   }
 
   /**
-   * Get all active streams for external access
+   * Get active streams for external access
+   */
+  // getActiveStreams() {
+  //   return this.getAllActiveStreams();
+  // }
+
+  /**
+   * Get all active streams - check filesystem for actual running streams
    */
   getActiveStreams() {
-    return this.getAllActiveStreams();
+    const streams = [];
+    const fs = require('fs');
+    const path = require('path');
+
+    try {
+      // Always check filesystem for truth - don't rely on in-memory Map
+      if (fs.existsSync(this.hlsOutputDir)) {
+        const dirs = fs.readdirSync(this.hlsOutputDir, { withFileTypes: true })
+          .filter(dirent => dirent.isDirectory());
+
+        for (const dir of dirs) {
+          const playlistPath = path.join(this.hlsOutputDir, dir.name, 'playlist.m3u8');
+
+          if (fs.existsSync(playlistPath)) {
+            const stats = fs.statSync(playlistPath);
+            // Consider active if modified in last 60 seconds
+            const isActive = (Date.now() - stats.mtime.getTime()) < 60000;
+
+            if (isActive) {
+              // Extract device info from directory name
+              const deviceId = dir.name.replace('_hls', '').replace(/-/g, '.');
+
+              // Check if we have this stream in memory
+              const memoryStream = this.activeStreams.get(dir.name);
+
+              streams.push({
+                streamId: dir.name,
+                deviceName: memoryStream?.device?.name || `Device ${deviceId}`,
+                deviceId: deviceId,
+                startTime: memoryStream?.startTime || stats.birthtime,
+                status: 'active',
+                audioDisabled: false
+              });
+            }
+          }
+        }
+      }
+
+      // Also check in-memory streams that might not have filesystem presence yet
+      for (const [streamId, streamInfo] of this.activeStreams) {
+        if (!streams.find(s => s.streamId === streamId)) {
+          streams.push({
+            streamId,
+            deviceName: streamInfo.device.name,
+            deviceId: streamInfo.device.id,
+            startTime: streamInfo.startTime,
+            status: streamInfo.status || 'starting',
+            audioDisabled: streamInfo.audioDisabled || false
+          });
+        }
+      }
+
+    } catch (error) {
+      logger.warn('Failed to get active streams:', error);
+    }
+
+    return streams;
   }
 
   /**

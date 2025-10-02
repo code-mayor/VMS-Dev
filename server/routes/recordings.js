@@ -349,6 +349,143 @@ async function startAutoRecording(deviceId, chunkDuration, dbConnection) {
   }
 }
 
+// NEW FUNCTION: Start scheduled recording
+async function startScheduledRecording(params) {
+  const {
+    deviceId,
+    scheduleId,
+    scheduleName,
+    duration,
+    quality = 'medium',
+    chunkDuration = 1,
+    recordingId
+  } = params;
+
+  try {
+    const dirCheck = await ensureRecordingsDirectory();
+    if (!dirCheck.success) {
+      throw new Error(`Recordings directory not accessible: ${dirCheck.error}`);
+    }
+
+    console.log(`📅 Starting scheduled recording: ${scheduleName} for device ${deviceId}`);
+
+    const device = await getDeviceById(deviceId, global.dbConnection);
+    if (!device) {
+      throw new Error(`Device not found: ${deviceId}`);
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `scheduled_${deviceId}_${timestamp}.mp4`;
+    const outputPath = path.resolve(RECORDINGS_DIR, filename);
+
+    // Build RTSP URL
+    const rtspUrl = `rtsp://${encodeURIComponent(device.rtsp_username)}:${encodeURIComponent(device.rtsp_password)}@${device.ip}:554/profile1`;
+
+    console.log(`📁 Output: ${outputPath}`);
+    console.log(`🔑 Recording ID: ${recordingId}`);
+    console.log(`⏱️ Duration: ${duration}s`);
+
+    // FFmpeg args
+    const ffmpegArgs = [
+      '-rtsp_transport', 'tcp',
+      '-i', rtspUrl,
+      '-c:v', 'copy',
+      '-an',
+      '-t', duration.toString(),
+      '-f', 'mp4',
+      '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+      '-y',
+      outputPath
+    ];
+
+    const { spawn } = require('child_process');
+    const ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    // Store recording info
+    const recordingInfo = {
+      process: ffmpegProcess,
+      deviceId,
+      recordingId,
+      scheduleId,
+      scheduleName,
+      outputPath,
+      filename,
+      startTime: new Date(),
+      duration,
+      type: 'scheduled',
+      pid: ffmpegProcess.pid
+    };
+
+    activeRecordings.set(recordingId, recordingInfo);
+    ffmpegProcesses.set(recordingId, ffmpegProcess);
+
+    // Save to database
+    const startTime = new Date();
+    await saveRecordingMetadata({
+      id: recordingId.substring(0, 36),
+      deviceId,
+      filename,
+      path: `/recordings/${filename}`,
+      size: 0,
+      duration: 0,
+      startTime,
+      endTime: null,
+      type: 'scheduled',
+      status: 'recording'
+    }, global.dbConnection);
+
+    // Handle process exit
+    ffmpegProcess.on('exit', async (code, signal) => {
+      console.log(`🏁 Scheduled recording ended: ${recordingId}, code=${code}`);
+
+      try {
+        const stats = await fs.promises.stat(outputPath).catch(() => ({ size: 0 }));
+        const endTime = new Date();
+        const actualDuration = Math.floor((endTime - startTime) / 1000);
+
+        await global.dbConnection.run(
+          `UPDATE recordings 
+           SET end_time = ?, file_size = ?, duration = ?
+           WHERE id = ?`,
+          [endTime, stats.size, actualDuration, recordingId.substring(0, 36)]
+        );
+
+        console.log(`✅ Scheduled recording saved: ${filename} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
+      } catch (error) {
+        console.error(`❌ Failed to update scheduled recording: ${error.message}`);
+      }
+
+      activeRecordings.delete(recordingId);
+      ffmpegProcesses.delete(recordingId);
+    });
+
+    // Monitor stderr
+    ffmpegProcess.stderr.on('data', (data) => {
+      const output = data.toString();
+      if (output.includes('Error') || output.includes('Invalid')) {
+        console.error(`FFmpeg error for ${deviceId}: ${output}`);
+      }
+    });
+
+    console.log(`✅ Scheduled recording started: ${recordingId}`);
+
+    return {
+      success: true,
+      recordingId,
+      message: 'Scheduled recording started'
+    };
+
+  } catch (error) {
+    console.error(`💥 Scheduled recording failed for ${deviceId}:`, error);
+    throw error;
+  }
+}
+
+// Export the function
+module.exports.startScheduledRecording = startScheduledRecording;
+
 async function stopRecording(recordingId, dbConnection) {
   try {
     console.log(`🛑 Stopping recording: ${recordingId}`)
@@ -1055,4 +1192,6 @@ module.exports = router
 // Add functions as properties of the router
 router.startAutoRecordingsForDevices = startAutoRecordingsForDevices
 router.stopAllAutoRecordings = stopAllAutoRecordings
+router.startScheduledRecording = startScheduledRecording
+router.stopRecording = stopRecording
 router.autoRecordingSettings = autoRecordingSettings

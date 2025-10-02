@@ -335,7 +335,6 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
 
   const startMotionDetection = async (deviceId: string) => {
     try {
-
       // ADD THESE DEBUG LINES:
       console.log('Starting motion detection for device:', deviceId)
       const device = devices.find(d => d.id === deviceId)
@@ -481,97 +480,97 @@ export function EnhancedLiveView({ devices, selectedDevice, onDeviceSelect, onRe
 
   // Enhanced stream management with better error handling
   const startStream = async (device: Device) => {
-  console.log(`[startStream] Checking stream for ${device.name}`)
-  
-  const currentState = streamStates.get(device.id)
-  if (currentState?.status === 'connected') {
-    console.log(`[startStream] Already connected`)
-    return
-  }
+    console.log(`[startStream] Checking stream for ${device.name}`)
 
-  // Build the expected HLS URL
-  const streamId = `${device.id}_hls`
-  const hlsUrl = `http://localhost:3001/hls/${streamId}/playlist.m3u8`
-
-  // Set connecting state
-  setStreamState(device.id, {
-    deviceId: device.id,
-    url: '',
-    status: 'connecting',
-    audioEnabled: false,
-    recording: false
-  })
-
-  try {
-    // First check if stream is already running on backend
-    console.log(`Checking if stream already exists at: ${hlsUrl}`)
-    const checkResponse = await fetch(hlsUrl, { method: 'HEAD' })
-    
-    if (checkResponse.ok) {
-      console.log(`✅ Stream already running on backend for ${device.name}`)
-      
-      // Stream exists, just connect to it
-      setStreamState(device.id, {
-        deviceId: device.id,
-        url: hlsUrl,
-        status: 'connected',
-        audioEnabled: false,
-        recording: false
-      })
-      
-      toast.success(`Connected to existing stream: ${device.name}`)
+    const currentState = streamStates.get(device.id)
+    if (currentState?.status === 'connected') {
+      console.log(`[startStream] Already connected`)
       return
     }
 
-    // Stream doesn't exist, start it
-    console.log(`Stream not found, starting new stream for ${device.id}`)
-    
-    const response = await fetch(`http://localhost:3001/api/streams/${device.id}/start`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ quality: 'auto', profile: 'auto' })
-    })
+    // Build the expected HLS URL
+    const streamId = `${device.id}_hls`
+    const hlsUrl = `http://localhost:3001/hls/${streamId}/playlist.m3u8`
 
-    if (!response.ok) {
-      const errorText = await response.text()
-      throw new Error(`Backend failed: ${response.status} - ${errorText}`)
-    }
-
-    const data = await response.json()
-    console.log('Backend stream response:', data)
-
-    // Use the URL from backend
-    const finalUrl = `http://localhost:3001${data.url}`
-    
-    // Wait a bit for FFmpeg to initialize
-    await new Promise(resolve => setTimeout(resolve, 2000))
-
-    // Set connected state
+    // Set connecting state
     setStreamState(device.id, {
       deviceId: device.id,
-      url: finalUrl,
-      status: 'connected',
+      url: '',
+      status: 'connecting',
       audioEnabled: false,
       recording: false
     })
 
-    console.log(`✅ New stream started for ${device.name}`)
-    toast.success(`Stream started: ${device.name}`)
+    try {
+      // First check if stream is already running on backend
+      console.log(`Checking if stream already exists at: ${hlsUrl}`)
+      const checkResponse = await fetch(hlsUrl, { method: 'HEAD' })
 
-  } catch (err: any) {
-    console.error(`Failed to start stream for ${device.name}:`, err)
-    setStreamState(device.id, {
-      deviceId: device.id,
-      url: '',
-      status: 'error',
-      audioEnabled: false,
-      recording: false,
-      error: err.message
-    })
-    
-    toast.error(`Stream error: ${err.message}`)
+      if (checkResponse.ok) {
+        console.log(`✅ Stream already running on backend for ${device.name}`)
+
+        // Stream exists, just connect to it
+        setStreamState(device.id, {
+          deviceId: device.id,
+          url: hlsUrl,
+          status: 'connected',
+          audioEnabled: false,
+          recording: false
+        })
+
+        toast.success(`Connected to existing stream: ${device.name}`)
+        return
+      }
+
+      // Stream doesn't exist, start it
+      console.log(`Stream not found, starting new stream for ${device.id}`)
+
+      const response = await fetch(`http://localhost:3001/api/streams/${device.id}/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ quality: 'auto', profile: 'auto' })
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`Backend failed: ${response.status} - ${errorText}`)
+      }
+
+      const data = await response.json()
+      console.log('Backend stream response:', data)
+
+      // Use the URL from backend
+      const finalUrl = `http://localhost:3001${data.url}`
+
+      // Wait a bit for FFmpeg to initialize
+      await new Promise(resolve => setTimeout(resolve, 2000))
+
+      // Set connected state
+      setStreamState(device.id, {
+        deviceId: device.id,
+        url: finalUrl,
+        status: 'connected',
+        audioEnabled: false,
+        recording: false
+      })
+
+      console.log(`✅ New stream started for ${device.name}`)
+      toast.success(`Stream started: ${device.name}`)
+
+    } catch (err: any) {
+      console.error(`Failed to start stream for ${device.name}:`, err)
+      setStreamState(device.id, {
+        deviceId: device.id,
+        url: '',
+        status: 'error',
+        audioEnabled: false,
+        recording: false,
+        error: err.message
+      })
+
+      toast.error(`Stream error: ${err.message}`)
+    }
   }
-}
 
   const stopStream = async (deviceId: string) => {
     try {

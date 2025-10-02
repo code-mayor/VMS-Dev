@@ -28,6 +28,7 @@ LoginForm.tsx              VideoPlaybackDialog.tsx
 MainContent.tsx            VideoRecording.tsx
 MainNavigation.tsx         WebRTCPlayer.tsx
 MotionDetection.tsx        WebRTCVideoPlayer.tsx
+RecordingSchedules.tsx
 
 VMS_Dev-New/components/cards:
 DeviceCard.tsx
@@ -119,7 +120,7 @@ VMS_Dev-New/server/public/hls:
 VMS_Dev-New/server/public/recordings:
 
 VMS_Dev-New/server/routes:
-audit.js  devices.js  motion.js          recordings-fixed.js  streams.js
+audit.js  devices.js  motion.js          recordings-fixed.js  streams.js  schedules.js
 auth.js   health.js   onvif-profiles.js  recordings.js
 
 VMS_Dev-New/server/scripts:

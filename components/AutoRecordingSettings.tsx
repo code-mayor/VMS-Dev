@@ -3,6 +3,7 @@ import { Button } from './ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card'
 import { Badge } from './ui/badge'
 import { Alert, AlertDescription } from './ui/alert'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { Switch } from './ui/switch'
 import { Input } from './ui/input'
 import { Label } from './ui/label'
@@ -18,10 +19,14 @@ import {
   Camera,
   Timer,
   Disc,
-  Calendar
+  Calendar,
+  CalendarClock,
+  Plus
 } from 'lucide-react'
 import { recordingService, AutoRecordingSettings as RecordingSettings } from '../services/recording-service'
 import { toast } from 'sonner'
+import { RecordingSchedules } from './RecordingSchedules'
+import { DeviceSelector } from './DeviceSelector'
 
 interface Device {
   id: string
@@ -37,13 +42,13 @@ interface AutoRecordingSettingsProps {
 }
 
 export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordingSettingsProps) {
-  // Auto-recording settings state (optimized for 1-minute chunks)
+  // Auto-recording settings state
   const [settings, setSettings] = useState<RecordingSettings>({
     enabled: false,
-    chunkDuration: 1, // minutes - 1 minute for testing
+    chunkDuration: 1,
     quality: 'medium',
-    maxStorage: 30, // GB
-    retentionPeriod: 1, // days
+    maxStorage: 30,
+    retentionPeriod: 1,
     enabledDevices: []
   })
 
@@ -53,6 +58,7 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
   const [error, setError] = useState<string | null>(null)
   const [hasChanges, setHasChanges] = useState(false)
   const [initialSettings, setInitialSettings] = useState<RecordingSettings | null>(null)
+  const [activeTab, setActiveTab] = useState('configuration')
 
   // Statistics
   const [statistics, setStatistics] = useState({
@@ -63,22 +69,22 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
 
   const [saveTimeout, setSaveTimeout] = useState<NodeJS.Timeout | null>(null)
 
-  // Initial load only
+  // Initial load
   useEffect(() => {
     loadSettings()
     loadStatistics()
-  }, []) // Empty dependency array - only run once
+  }, [])
 
-  // Periodic statistics refresh only (not settings)
+  // Periodic statistics refresh
   useEffect(() => {
     const interval = setInterval(() => {
-      loadStatistics() // Only refresh statistics, NOT settings
+      loadStatistics()
     }, 10000)
 
     return () => clearInterval(interval)
   }, [])
 
-  // Simple change detection
+  // Change detection
   useEffect(() => {
     if (initialSettings) {
       const changed = JSON.stringify(settings) !== JSON.stringify(initialSettings)
@@ -86,38 +92,31 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
     }
   }, [settings, initialSettings])
 
-  // Unified handler for all setting changes
   const handleSettingChange = (key: string, value: any) => {
-    console.log(`🔍 Setting change: ${key} = ${value}`)
-
-    // Clear existing timeout
     if (saveTimeout) {
       clearTimeout(saveTimeout)
       setSaveTimeout(null)
     }
 
-    // Update settings immediately
     const newSettings = { ...settings, [key]: value }
     setSettings(newSettings)
     setHasChanges(true)
 
-    // NEVER auto-save these critical settings
+    // Never auto-save critical settings
     const criticalSettings = ['enabled', 'enabledDevices', 'chunkDuration']
     if (criticalSettings.includes(key)) {
-      console.log('🔍 Critical setting changed - manual save required')
       return
     }
 
-    // Auto-save only for non-critical settings after delay
+    // Auto-save non-critical settings after delay
     const timeout = setTimeout(() => {
-      if (!isSaving) { // Don't auto-save if already saving
+      if (!isSaving) {
         saveSettings()
       }
     }, 3000)
     setSaveTimeout(timeout)
   }
 
-  // Specific handlers using the unified function
   const handleEnabledChange = (checked: boolean) => {
     handleSettingChange('enabled', checked)
   }
@@ -151,7 +150,6 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
 
   const loadSettings = async (forceReload: boolean = false) => {
     if (isSaving) {
-      console.log('⏸️ Skipping load during save operation')
       return
     }
 
@@ -159,17 +157,10 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
     setError(null)
 
     try {
-      console.log('⚙️ Loading auto-recording settings from server...')
       const currentSettings = await recordingService.getAutoRecordingSettings()
 
-      console.log('✅ Settings loaded from server:', currentSettings)
-
-      // Clear any drafts
-      localStorage.removeItem('autoRecordingDraft')
-
-      // Use the settings from the server as-is if they exist
       const validatedSettings = {
-        enabled: currentSettings.enabled === true, // Respect server value
+        enabled: currentSettings.enabled === true,
         chunkDuration: currentSettings.chunkDuration || 1,
         quality: currentSettings.quality || 'medium',
         maxStorage: currentSettings.maxStorage || 10,
@@ -182,10 +173,9 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
       setHasChanges(false)
 
     } catch (err: any) {
-      console.error('❌ Failed to load settings:', err)
+      console.error('Failed to load settings:', err)
       setError('Failed to load settings: ' + err.message)
 
-      // Use safe defaults on error
       const defaults = {
         enabled: false,
         chunkDuration: 1,
@@ -201,27 +191,18 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
     }
   }
 
-  // Fix device filtering - only show ONLINE authenticated devices
   const getAvailableDevices = () => {
-    return devices.filter(device => {
-      // Must be authenticated
-      if (!device.authenticated) return false
-
-      return true
-    })
+    return devices.filter(device => device.authenticated)
   }
 
-  // Use this for device selection
   const availableDevices = getAvailableDevices()
 
   const loadStatistics = async () => {
     try {
-      // Load storage info
       const response = await fetch('http://localhost:3001/api/recordings/storage-info')
       if (response.ok) {
         const storageInfo = await response.json()
 
-        // Load active recordings
         const activeResponse = await fetch('http://localhost:3001/api/recordings/active')
         const activeData = activeResponse.ok ? await activeResponse.json() : { activeRecordings: [] }
 
@@ -232,7 +213,7 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
         })
       }
     } catch (err) {
-      console.warn('⚠️ Failed to load statistics:', err)
+      console.warn('Failed to load statistics:', err)
     }
   }
 
@@ -243,21 +224,16 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
     setError(null)
 
     try {
-      console.log('💾 Saving settings to server:', settings)
-
-      // Validate
       if (settings.enabled && settings.enabledDevices.length === 0) {
         throw new Error('Please select at least one device for auto-recording')
       }
 
-      // Ensure chunk duration is valid
       const validChunkDuration = Math.max(1, Math.min(60, parseInt(String(settings.chunkDuration)) || 2))
       const settingsToSave = {
         ...settings,
         chunkDuration: validChunkDuration
       }
 
-      // Send directly to server without wrapper
       const response = await fetch('http://localhost:3001/api/recordings/auto-settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -269,14 +245,11 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
       }
 
       const savedSettings = await response.json()
-      console.log('✅ Saved settings:', savedSettings)
 
-      // Update local state with server response
       setSettings(savedSettings)
       setInitialSettings(savedSettings)
       setHasChanges(false)
 
-      // Clear save timeout
       if (saveTimeout) {
         clearTimeout(saveTimeout)
         setSaveTimeout(null)
@@ -290,13 +263,12 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
           : 'Auto-recording disabled'
       )
 
-      // Reload stats after saving
       setTimeout(() => {
         loadStatistics()
       }, 2000)
 
     } catch (err: any) {
-      console.error('❌ Save failed:', err)
+      console.error('Save failed:', err)
       setError(err.message)
       toast.error('Failed to save settings')
     } finally {
@@ -309,7 +281,6 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
       setSettings(initialSettings)
       setHasChanges(false)
       setError(null)
-      localStorage.removeItem('autoRecordingDraft') // Clear draft when resetting
       toast.info('Settings reset to last saved values')
     }
   }
@@ -317,9 +288,8 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
   const calculateEstimatedUsage = () => {
     if (!settings.enabled || settings.enabledDevices.length === 0) return '0 MB/day'
 
-    // Rough estimation: 1 minute of medium quality video = ~10MB
     const mbPerMinute = settings.quality === 'low' ? 5 : settings.quality === 'high' ? 20 : 10
-    const minutesPerDay = 24 * 60 // Full day recording
+    const minutesPerDay = 24 * 60
     const totalMbPerDay = settings.enabledDevices.length * minutesPerDay * mbPerMinute
 
     if (totalMbPerDay < 1024) {
@@ -329,22 +299,19 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
     }
   }
 
-  // Get authenticated devices only
-  const authenticatedDevices = devices.filter(device => device.authenticated)
-
   return (
     <div className="w-full max-w-none px-4 sm:px-6 lg:px-8 py-6 space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2>Auto Recording Settings</h2>
+          <h2>Recording Management</h2>
           <p className="text-sm text-gray-600 mt-1">
-            Configure automatic recording with customizable chunk duration for all authenticated cameras
+            Configure continuous and scheduled recording for all authenticated cameras
           </p>
         </div>
 
         <div className="flex items-center space-x-2">
-          {hasChanges && (
+          {hasChanges && activeTab === 'configuration' && (
             <Badge variant="outline" className="text-orange-600 border-orange-300">
               Unsaved Changes
             </Badge>
@@ -352,7 +319,10 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
 
           <Button
             variant="outline"
-            onClick={() => loadSettings(true)}
+            onClick={() => {
+              loadSettings(true)
+              loadStatistics()
+            }}
             disabled={isLoading || isSaving}
           >
             <RefreshCw className={`w-4 h-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
@@ -420,233 +390,208 @@ export function AutoRecordingSettings({ devices, onSettingsChange }: AutoRecordi
         </Card>
       </div>
 
-      {/* Recording Configuration */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center space-x-2">
-            <Settings className="w-5 h-5" />
-            <span>Recording Configuration</span>
-          </CardTitle>
-          <CardDescription>
-            Configure automatic recording settings and quality parameters
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          {/* Enable Auto Recording */}
-          <div className="flex items-center justify-between p-4 border rounded-lg">
-            <div>
-              <div className="font-medium">Enable Auto Recording</div>
-              <div className="text-sm text-gray-600">
-                Automatically record all enabled cameras in chunks
-              </div>
-            </div>
-            <Switch
-              checked={settings.enabled}
-              onCheckedChange={handleEnabledChange}
-              disabled={isLoading || isSaving}
-            />
-          </div>
+      {/* Tabbed Content */}
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+        <TabsList className="grid w-full grid-cols-3">
+          <TabsTrigger value="configuration" className="flex items-center space-x-2">
+            <Settings className="w-4 h-4" />
+            <span>Configuration</span>
+          </TabsTrigger>
+          <TabsTrigger value="schedules" className="flex items-center space-x-2">
+            <CalendarClock className="w-4 h-4" />
+            <span>Schedules</span>
+          </TabsTrigger>
+          <TabsTrigger value="devices" className="flex items-center space-x-2">
+            <Camera className="w-4 h-4" />
+            <span>Devices ({settings.enabledDevices.length}/{availableDevices.length})</span>
+          </TabsTrigger>
+        </TabsList>
 
-          {/* Settings Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {/* Chunk Duration */}
-            <div className="space-y-2">
-              <Label htmlFor="chunk-duration">Chunk Duration (minutes)</Label>
-              <Input
-                id="chunk-duration"
-                type="number"
-                value={settings.chunkDuration}
-                onChange={(e) => handleChunkDurationChange(e.target.value)}
-                min="1"
-                max="60"
-                disabled={isLoading || isSaving}
-              />
-              <div className="text-xs text-gray-500">
-                File size estimation: ~{settings.chunkDuration * 10}MB per chunk (medium quality)
-                <br />
-                • ~{Math.round(settings.chunkDuration * 10 * 0.5)}MB per chunk (low quality)
-                <br />
-                • ~{Math.round(settings.chunkDuration * 10 * 2)}MB per chunk (high quality)
-              </div>
-            </div>
-
-            {/* Recording Quality */}
-            <div className="space-y-2">
-              <Label>Recording Quality</Label>
-              <Select
-                value={settings.quality}
-                onValueChange={handleQualityChange}
-                disabled={isLoading || isSaving}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="low">Low Quality (480p) - Balanced</SelectItem>
-                  <SelectItem value="medium">Medium Quality (720p) - Balanced</SelectItem>
-                  <SelectItem value="high">High Quality (1080p) - Best</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Maximum Storage */}
-            <div className="space-y-2">
-              <Label htmlFor="max-storage">Maximum Storage (GB)</Label>
-              <Input
-                id="max-storage"
-                type="number"
-                value={settings.maxStorage}
-                onChange={(e) => handleStorageChange(e.target.value)}
-                min="1"
-                max="10000"
-                disabled={isLoading || isSaving}
-              />
-              <div className="text-xs text-gray-500">
-                Automatic cleanup when storage limit is reached (oldest files deleted first)
-              </div>
-            </div>
-
-            {/* Retention Period */}
-            <div className="space-y-2">
-              <Label htmlFor="retention-period">Retention Period (days)</Label>
-              <Input
-                id="retention-period"
-                type="number"
-                value={settings.retentionPeriod}
-                onChange={(e) => handleRetentionChange(e.target.value)}
-                min="1"
-                max="365"
-                disabled={isLoading || isSaving}
-              />
-              <div className="text-xs text-gray-500">
-                Automatically delete recordings older than this period
-              </div>
-            </div>
-          </div>
-
-          {/* Estimated Usage */}
-          <div className="p-4 bg-blue-50 rounded-lg border border-blue-200">
-            <div className="flex items-center space-x-2 mb-2">
-              <HardDrive className="w-4 h-4 text-blue-600" />
-              <span className="font-medium text-blue-900">Estimated Storage Usage</span>
-            </div>
-            <div className="text-sm text-blue-800">
-              {calculateEstimatedUsage()} for {settings.enabledDevices.length} selected device(s)
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Camera Selection */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center space-x-2">
-            <Camera className="w-5 h-5" />
-            <span>Camera Selection</span>
-          </CardTitle>
-          <CardDescription>
-            Select which cameras to include in auto-recording
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {(() => {
-            // Get available devices (authenticated ones)
-            const availableDevices = getAvailableDevices()
-
-            if (availableDevices.length === 0) {
-              return (
-                <Alert>
-                  <AlertTriangle className="h-4 w-4" />
-                  <AlertDescription>
-                    No authenticated cameras available. Please authenticate at least one camera in the Device Discovery section.
-                  </AlertDescription>
-                </Alert>
-              )
-            }
-
-            return (
-              <div className="space-y-3">
-                {availableDevices.map((device) => (
-                  <div key={device.id} className="flex items-center justify-between p-3 border rounded-lg">
-                    <div className="flex items-center space-x-3">
-                      <div>
-                        <div className="font-medium">{device.name}</div>
-                        <div className="text-sm text-gray-600">{device.ip_address}</div>
-                      </div>
-                      {/* Don't show status badge here since it might be incorrect */}
-                      <Badge variant="outline" className="text-green-600 border-green-300">
-                        Authenticated
-                      </Badge>
-                    </div>
-                    <Switch
-                      checked={settings.enabledDevices.includes(device.id)}
-                      onCheckedChange={() => toggleDeviceEnabled(device.id)}
-                      disabled={isLoading || isSaving}
-                    />
+        {/* Configuration Tab */}
+        <TabsContent value="configuration" className="space-y-6 mt-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center space-x-2">
+                <Settings className="w-5 h-5" />
+                <span>Continuous Recording</span>
+              </CardTitle>
+              <CardDescription>
+                Configure 24/7 automatic recording settings and quality parameters
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {/* Enable Auto Recording */}
+              <div className="flex items-center justify-between p-4 border rounded-lg">
+                <div>
+                  <div className="font-medium">Enable Continuous Recording</div>
+                  <div className="text-sm text-gray-600">
+                    Record all enabled cameras 24/7 in chunks
                   </div>
-                ))}
+                </div>
+                <Switch
+                  checked={settings.enabled}
+                  onCheckedChange={handleEnabledChange}
+                  disabled={isLoading || isSaving}
+                />
               </div>
-            )
-          })()}
 
-          {settings.enabled && settings.enabledDevices.length === 0 && getAvailableDevices().length > 0 && (
+              {/* Settings Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <Label htmlFor="chunk-duration">Chunk Duration (minutes)</Label>
+                  <Input
+                    id="chunk-duration"
+                    type="number"
+                    value={settings.chunkDuration}
+                    onChange={(e) => handleChunkDurationChange(e.target.value)}
+                    min="1"
+                    max="60"
+                    disabled={isLoading || isSaving}
+                  />
+                  <div className="text-xs text-gray-500">
+                    Estimated file size per chunk at medium quality: ~{settings.chunkDuration * 10}MB
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Recording Quality</Label>
+                  <Select
+                    value={settings.quality}
+                    onValueChange={handleQualityChange}
+                    disabled={isLoading || isSaving}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="low">Low Quality (480p)</SelectItem>
+                      <SelectItem value="medium">Medium Quality (720p)</SelectItem>
+                      <SelectItem value="high">High Quality (1080p)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="max-storage">Maximum Storage (GB)</Label>
+                  <Input
+                    id="max-storage"
+                    type="number"
+                    value={settings.maxStorage}
+                    onChange={(e) => handleStorageChange(e.target.value)}
+                    min="1"
+                    max="10000"
+                    disabled={isLoading || isSaving}
+                  />
+                  <div className="text-xs text-gray-500">
+                    Oldest recordings deleted first when limit reached
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="retention-period">Retention Period (days)</Label>
+                  <Input
+                    id="retention-period"
+                    type="number"
+                    value={settings.retentionPeriod}
+                    onChange={(e) => handleRetentionChange(e.target.value)}
+                    min="1"
+                    max="365"
+                    disabled={isLoading || isSaving}
+                  />
+                  <div className="text-xs text-gray-500">
+                    Auto-delete recordings older than this period
+                  </div>
+                </div>
+              </div>
+
+              {/* Estimated Usage */}
+              <div className="p-4 bg-blue-50 rounded-lg border border-blue-200">
+                <div className="flex items-center space-x-2 mb-2">
+                  <HardDrive className="w-4 h-4 text-blue-600" />
+                  <span className="font-medium text-blue-900">Estimated Storage Usage</span>
+                </div>
+                <div className="text-sm text-blue-800">
+                  {calculateEstimatedUsage()} for {settings.enabledDevices.length} selected device(s)
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Action Buttons */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              {settings.enabled && (
+                <Badge variant="default" className="text-green-600 border-green-300 bg-green-50">
+                  <CheckCircle className="w-3 h-3 mr-1" />
+                  Continuous Recording Active
+                </Badge>
+              )}
+
+              {statistics.activeRecordings > 0 && (
+                <Badge variant="destructive">
+                  <Disc className="w-3 h-3 mr-1" />
+                  {statistics.activeRecordings} Recording Now
+                </Badge>
+              )}
+            </div>
+
+            <div className="flex items-center space-x-2">
+              {hasChanges && (
+                <Button
+                  variant="outline"
+                  onClick={resetSettings}
+                  disabled={isLoading || isSaving}
+                >
+                  Reset Changes
+                </Button>
+              )}
+
+              <Button
+                onClick={saveSettings}
+                disabled={isLoading || isSaving || !hasChanges}
+              >
+                {isSaving ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-4 h-4 mr-2" />
+                    Save Settings
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        </TabsContent>
+
+        {/* Schedules Tab */}
+        <TabsContent value="schedules" className="mt-6">
+          <RecordingSchedules devices={availableDevices} />
+        </TabsContent>
+
+        {/* Devices Tab */}
+        <TabsContent value="devices" className="mt-6">
+          <DeviceSelector
+            devices={availableDevices}
+            selectedDevices={settings.enabledDevices}
+            onSelectionChange={(selectedIds) => {
+              handleSettingChange('enabledDevices', selectedIds)
+            }}
+            disabled={isLoading || isSaving}
+          />
+
+          {settings.enabled && settings.enabledDevices.length === 0 && availableDevices.length > 0 && (
             <Alert className="mt-4">
               <AlertTriangle className="h-4 w-4" />
               <AlertDescription>
-                Auto-recording is enabled but no cameras are selected. Please select at least one camera.
+                Recording is enabled but no devices are selected. Select at least one device.
               </AlertDescription>
             </Alert>
           )}
-        </CardContent>
-      </Card>
-
-      {/* Action Buttons */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-2">
-          {settings.enabled && (
-            <Badge variant="default" className="text-green-600 border-green-300 bg-green-50">
-              <CheckCircle className="w-3 h-3 mr-1" />
-              Auto Recording Enabled
-            </Badge>
-          )}
-
-          {statistics.activeRecordings > 0 && (
-            <Badge variant="destructive">
-              <Disc className="w-3 h-3 mr-1" />
-              {statistics.activeRecordings} Recording Now
-            </Badge>
-          )}
-        </div>
-
-        <div className="flex items-center space-x-2">
-          {hasChanges && (
-            <Button
-              variant="outline"
-              onClick={resetSettings}
-              disabled={isLoading || isSaving}
-            >
-              Reset Changes
-            </Button>
-          )}
-
-          <Button
-            onClick={saveSettings}
-            disabled={isLoading || isSaving || !hasChanges}
-          >
-            {isSaving ? (
-              <>
-                <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
-                Saving...
-              </>
-            ) : (
-              <>
-                <Save className="w-4 h-4 mr-2" />
-                Save Settings
-              </>
-            )}
-          </Button>
-        </div>
-      </div>
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

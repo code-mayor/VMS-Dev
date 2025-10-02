@@ -29,6 +29,7 @@ import {
   Zap,
   Router,
   Target,
+  Trash2,
   Lock,
   Unlock,
   Play,
@@ -139,6 +140,57 @@ export function OptimizedDeviceDiscovery({ onDevicesDiscovered,
       showAdvanced: false
     }
   })
+
+  // // Check if we should open manual add dialog
+  // useEffect(() => {
+  //   const shouldOpenManual = sessionStorage.getItem('openManualAddDialog')
+  //   if (shouldOpenManual === 'true') {
+  //     setShowManualAdd(true)
+  //     sessionStorage.removeItem('openManualAddDialog')
+  //   }
+  // }, [])
+
+  // Check if we should open manual add dialog
+  useEffect(() => {
+    const checkAndOpenManualDialog = () => {
+      const flag = sessionStorage.getItem('openManualAddDialog');
+      if (flag === 'true') {
+        console.log('📝 Opening manual add dialog from flag');
+        sessionStorage.removeItem('openManualAddDialog');
+        setShowManualAdd(true);
+      }
+    };
+
+    // Initial check with small delay to ensure component is mounted
+    setTimeout(checkAndOpenManualDialog, 100);
+
+    // Listen for storage events
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'openManualAddDialog' && e.newValue === 'true') {
+        checkAndOpenManualDialog();
+      }
+    };
+
+    window.addEventListener('storage', handleStorageChange);
+
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+    };
+  }, []);
+
+  // Listen for manual add dialog event from App.tsx
+  useEffect(() => {
+    const handleOpenManualDialog = () => {
+      console.log('📝 Manual add dialog event received');
+      setShowManualAdd(true);
+    };
+
+    window.addEventListener('openManualAddDialog', handleOpenManualDialog);
+
+    return () => {
+      window.removeEventListener('openManualAddDialog', handleOpenManualDialog);
+    };
+  }, []);
 
   // Persist devices to sessionStorage whenever they change
   useEffect(() => {
@@ -485,6 +537,81 @@ export function OptimizedDeviceDiscovery({ onDevicesDiscovered,
       toast.error(`Bulk profile configuration failed: ${err.message}`)
     }
   }
+
+  // Bulk delete handler for production environments
+  const handleBulkDelete = async () => {
+    if (selectedDevices.size === 0) {
+      toast.error('No devices selected');
+      return;
+    }
+
+    const confirmDelete = confirm(
+      `⚠️ Delete ${selectedDevices.size} device(s)?\n\n` +
+      `This will permanently remove:\n` +
+      `• Device configurations\n` +
+      `• Authentication credentials\n` +
+      `• Stream settings\n\n` +
+      `This action cannot be undone.`
+    );
+
+    if (!confirmDelete) return;
+
+    const selectedArray = Array.from(selectedDevices);
+    const batchSize = 10; // Process in batches for large selections
+
+    toast.info(`Deleting ${selectedDevices.size} devices...`);
+
+    let successCount = 0;
+    let failureCount = 0;
+
+    // Process in batches to avoid overwhelming the server
+    for (let i = 0; i < selectedArray.length; i += batchSize) {
+      const batch = selectedArray.slice(i, i + batchSize);
+
+      const deletePromises = batch.map(async (deviceId) => {
+        try {
+          const response = await fetch(`http://localhost:3001/api/devices/${deviceId}`, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' }
+          });
+
+          if (response.ok) {
+            return { success: true, deviceId };
+          } else {
+            return { success: false, deviceId };
+          }
+        } catch (err) {
+          return { success: false, deviceId };
+        }
+      });
+
+      const results = await Promise.all(deletePromises);
+
+      results.forEach(result => {
+        if (result.success) {
+          successCount++;
+          // Remove from local state immediately
+          setDevices(prev => prev.filter(d => d.id !== result.deviceId));
+        } else {
+          failureCount++;
+        }
+      });
+    }
+
+    // Clear selection
+    setSelectedDevices(new Set());
+
+    // Show results
+    if (successCount > 0) {
+      toast.success(`Successfully deleted ${successCount} device(s)`);
+    }
+    if (failureCount > 0) {
+      toast.error(`Failed to delete ${failureCount} device(s)`);
+    }
+
+    // Refresh device count
+    onDevicesDiscovered(devices.filter(d => !selectedArray.includes(d.id)));
+  };
 
   const exportDevices = () => {
     const dataStr = JSON.stringify(filteredDevices, null, 2)
@@ -956,6 +1083,14 @@ export function OptimizedDeviceDiscovery({ onDevicesDiscovered,
                       <Button size="sm" variant="outline" onClick={handleBulkConfigureProfiles}>
                         <Settings className="w-4 h-4 mr-2" />
                         Configure Profiles
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={handleBulkDelete}
+                      >
+                        <Trash2 className="w-4 h-4 mr-2" />
+                        Delete ({selectedDevices.size})
                       </Button>
                     </div>
                   </div>

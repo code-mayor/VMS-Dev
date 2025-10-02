@@ -6,7 +6,7 @@ import { Sidebar } from './components/Sidebar'
 import { UserProfile, authService } from './services/local-auth-service'
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
-import { Toaster } from './components/ui/sonner'
+import { Toaster, toast } from 'sonner'
 import ErrorBoundary from './components/ErrorBoundary'
 
 // Simple icons to avoid import issues
@@ -82,6 +82,11 @@ function App() {
   const [selectedDevice, setSelectedDevice] = useState<any>(null)
   const [deviceCount, setDeviceCount] = useState(0)
 
+  // Dialog states for device management
+  const [showManualAdd, setShowManualAdd] = useState(false)
+  const [showEditDialog, setShowEditDialog] = useState(false)
+  const [deviceToEdit, setDeviceToEdit] = useState<any>(null)
+
   useEffect(() => {
     initializeApp()
   }, [])
@@ -105,7 +110,7 @@ function App() {
 
   const checkServerHealth = async (): Promise<boolean> => {
     try {
-      console.log('🏥 Checking server connectivity...')
+      console.log('🥼 Checking server connectivity...')
 
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 5000) // 5 second timeout
@@ -276,12 +281,135 @@ function App() {
         console.log('🎥 Auto-switching to live view for authenticated device from discovery')
         setActiveTask('live-view')
       } else {
-        console.log('📍 Device selected but staying in current context:', {
+        console.log('🔍 Device selected but staying in current context:', {
           activeTab,
           activeTask,
           reason: activeTab !== 'devices' ? 'not in devices tab' : 'not from discovery'
         })
       }
+    }
+  }
+
+  // Enhanced Device Management Handlers
+  const handleAddDevice = () => {
+    console.log('➕ Add Device Manual clicked')
+    // This will trigger the ManualAddDeviceDialog in OptimizedDeviceDiscovery
+    setActiveTask('device-discovery')
+    // Set a flag to open manual dialog
+    sessionStorage.setItem('openManualAddDialog', 'true')
+    toast.info('Opening manual device configuration...')
+  }
+
+  const handleEditDevice = () => {
+    console.log('✏️ Edit Device clicked')
+    if (!selectedDevice) {
+      toast.error('Please select a device from the list first')
+      return
+    }
+
+    // For now, show device info
+    toast.info(`Editing device: ${selectedDevice.name} (${selectedDevice.ip_address})`)
+    setDeviceToEdit(selectedDevice)
+    setShowEditDialog(true)
+
+    // You can implement a proper edit dialog here
+    console.log('Device to edit:', selectedDevice)
+  }
+
+  const handleDeleteDevice = async () => {
+    console.log('🗑️ Delete Device clicked')
+
+    if (!selectedDevice) {
+      toast.error('Please select a device from the list first')
+      return
+    }
+
+    const confirmDelete = confirm(
+      `Are you sure you want to delete "${selectedDevice.name}"?\n` +
+      `IP: ${selectedDevice.ip_address}\n\n` +
+      `This action cannot be undone.`
+    )
+
+    if (!confirmDelete) {
+      return
+    }
+
+    try {
+      console.log(`🗑️ Deleting device: ${selectedDevice.id}`)
+
+      const response = await fetch(`http://localhost:3001/api/devices/${selectedDevice.id}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(accessToken && { 'Authorization': `Bearer ${accessToken}` })
+        }
+      })
+
+      if (response.ok) {
+        toast.success(`Device "${selectedDevice.name}" deleted successfully`)
+        setSelectedDevice(null)
+
+        // Refresh device list and count
+        await checkServerHealth()
+
+        // If we're in live view, switch back to device discovery
+        if (activeTask === 'live-view') {
+          setActiveTask('device-discovery')
+        }
+      } else {
+        const errorData = await response.json().catch(() => ({}))
+        const errorMessage = errorData.error || errorData.message || 'Unknown error'
+        toast.error(`Failed to delete device: ${errorMessage}`)
+        console.error('Delete response:', errorData)
+      }
+    } catch (error: any) {
+      console.error('❌ Delete device error:', error)
+      toast.error(`Failed to delete device: ${error.message || 'Network error'}`)
+    }
+  }
+
+  const handleRefreshStatus = async () => {
+    console.log('🔄 Refresh Status clicked')
+    toast.info('Refreshing system status...')
+
+    try {
+      // First refresh server health
+      const healthOk = await checkServerHealth()
+
+      if (!healthOk) {
+        toast.error('Server connection lost')
+        return
+      }
+
+      // Then refresh devices if on devices tab
+      if (activeTab === 'devices') {
+        console.log('🔄 Refreshing devices...')
+
+        const response = await fetch('http://localhost:3001/api/devices/refresh', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(accessToken && { 'Authorization': `Bearer ${accessToken}` })
+          }
+        })
+
+        if (response.ok) {
+          const data = await response.json()
+          console.log('✅ Devices refreshed:', data)
+          toast.success(`Status refreshed - ${data.count || 0} devices active`)
+
+          // Update device count
+          setDeviceCount(data.count || 0)
+        } else {
+          console.warn('⚠️ Refresh returned non-OK status:', response.status)
+          toast.warning('Status refreshed with warnings')
+        }
+      } else {
+        toast.success('System status refreshed')
+      }
+    } catch (error: any) {
+      console.error('❌ Refresh error:', error)
+      toast.error(`Refresh failed: ${error.message || 'Unknown error'}`)
     }
   }
 
@@ -477,11 +605,19 @@ function App() {
           <Sidebar
             activeTab={activeTab}
             activeTask={activeTask}
+            selectedDevice={selectedDevice}
+            deviceCount={deviceCount}
+            systemStatus={{
+              backend: serverStatus.backend,
+              database: serverStatus.database,
+              discovery: serverStatus.discovery,
+              streaming: serverStatus.backend  // Use actual streaming status if available
+            }}
             onTaskChange={handleTaskChange}
-            onAddDevice={() => setActiveTask('device-discovery')}
-            onEditDevice={() => console.log('Edit device')}
-            onDeleteDevice={() => console.log('Delete device')}
-            onRefreshStatus={() => checkServerHealth()}
+            onAddDevice={handleAddDevice}
+            onEditDevice={handleEditDevice}
+            onDeleteDevice={handleDeleteDevice}
+            onRefreshStatus={handleRefreshStatus}
           />
 
           <div className="flex-1 overflow-hidden bg-gray-50">
@@ -490,7 +626,7 @@ function App() {
                 <div className="h-full flex items-center justify-center">
                   <div className="text-center max-w-md p-6">
                     <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                      <AlertTriangle className="w-8 h-8 text-red-600" />
+                      <AlertTriangle />
                     </div>
                     <h3 className="font-medium text-gray-900 mb-2">Application Error</h3>
                     <p className="text-sm text-gray-600 mb-4">
@@ -513,8 +649,8 @@ function App() {
                         checkExistingSession();
                       });
                     }}>
-                      <RefreshCw className="w-4 h-4 mr-2" />
-                      Reset Application
+                      <RefreshCw />
+                      <span className="ml-2">Reset Application</span>
                     </Button>
                   </div>
                 </div>

@@ -19,6 +19,9 @@ export default defineConfig({
     port: 3000,
     host: '0.0.0.0',
     strictPort: true,
+    hmr: {
+      overlay: false
+    },
     proxy: {
       '/api': {
         target: 'http://localhost:3001',
@@ -29,7 +32,7 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    sourcemap: false,
     target: 'esnext',
     rollupOptions: {
       output: {
@@ -41,6 +44,7 @@ export default defineConfig({
     }
   },
   esbuild: {
-    target: 'esnext'
+    target: 'esnext',
+    logOverride: { 'this-is-undefined-in-esm': 'silent' }
   }
 })
