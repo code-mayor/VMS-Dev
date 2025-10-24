@@ -66,7 +66,8 @@ router.get('/', async (req, res) => {
       response_time: Math.round(responseTime)
     };
 
-    logger.info('Health check performed');
+    // logger.info('Health check performed');
+    logger.healthCheck('Health check performed');
 
     // Return health data at root level for frontend compatibility
     res.json({

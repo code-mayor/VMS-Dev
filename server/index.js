@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const loggingConfig = require('./config/logging');
 const { logger } = require('./utils/logger');
 require('dotenv').config();
 
@@ -861,39 +862,48 @@ const startServer = async () => {
     // Step 6: Initialize persistent streaming for authenticated devices
     const initializePersistentStreaming = async () => {
       try {
-        logger.info('🎥 Initializing persistent streaming for authenticated devices...');
+        logger.stream('info', 'Initializing persistent streaming for authenticated devices...');
 
         const devices = await dbAdapter.all(
           'SELECT * FROM devices WHERE authenticated = 1 AND rtsp_username IS NOT NULL AND rtsp_password IS NOT NULL'
         );
 
-        if (devices.length > 0) {
-          const { HLSStreamingService } = require('./services/hls-streaming-service');
-          const hlsService = new HLSStreamingService();
-
-          for (const device of devices) {
-            try {
-              const streamId = `${device.id}_hls`;
-              const activeStreams = hlsService.getActiveStreams();
-              const isActive = activeStreams.some(s => s.streamId === streamId);
-
-              if (!isActive) {
-                logger.info(`🎬 Auto-starting persistent stream for ${device.name}`);
-                await hlsService.startStreaming(device);
-                // Stagger stream starts to avoid overwhelming the system
-                await new Promise(resolve => setTimeout(resolve, 2000));
-              } else {
-                logger.info(`✅ Stream already active for ${device.name}`);
-              }
-            } catch (error) {
-              logger.error(`Failed to start persistent stream for ${device.name}:`, error.message);
-            }
-          }
-
-          logger.info('✅ Persistent streaming initialization completed');
-        } else {
-          logger.info('📷 No authenticated devices found for persistent streaming');
+        if (devices.length === 0) {
+          logger.info('No authenticated devices found for persistent streaming');
+          return;
         }
+
+        const { HLSStreamingService } = require('./services/hls-streaming-service');
+        const hlsService = new HLSStreamingService();
+
+        // Start streams SEQUENTIALLY with delay to prevent race conditions
+        for (const device of devices) {
+          try {
+            const streamId = `${device.id}_hls`;
+            const activeStreams = hlsService.getActiveStreams();
+            const isActive = activeStreams.some(s => s.streamId === streamId);
+
+            if (!isActive) {
+              logger.stream('info', `Auto-starting persistent stream for ${device.name}`);
+
+              await hlsService.startStreaming(device);
+
+              // CRITICAL: Wait between streams to prevent overwhelming system
+              await new Promise(resolve => setTimeout(resolve, 2000)); // 2-second delay
+
+            } else {
+              // Only log in DEBUG mode
+              if (loggingConfig.shouldLog('DEBUG')) {
+                logger.info(`Stream already active for ${device.name}`);
+              }
+            }
+          } catch (error) {
+            logger.error(`Failed to start persistent stream for ${device.name}: ${error.message}`);
+            // Continue with next device instead of failing completely
+          }
+        }
+
+        logger.stream('info', 'Persistent streaming initialization completed');
       } catch (error) {
         logger.error('Failed to initialize persistent streaming:', error);
       }

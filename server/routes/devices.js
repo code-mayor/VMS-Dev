@@ -157,7 +157,9 @@ router.get('/', async (req, res) => {
       authenticated: Boolean(device.authenticated)
     }));
 
-    logger.info(`Retrieved ${devices.length} devices`);
+    // logger.info(`Retrieved ${devices.length} devices`);
+    logger.devices(devices.length, 'Retrieved');
+
     res.json({
       success: true,
       devices: processedDevices,

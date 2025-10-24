@@ -65,6 +65,7 @@ export function HLSPlayer({
   const freezeDetectionRef = useRef<NodeJS.Timeout | null>(null)
   const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const retryIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const healthCheckIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
   const [isPlaying, setIsPlaying] = useState(false)
   const [isMuted, setIsMuted] = useState(muted)
@@ -83,6 +84,11 @@ export function HLSPlayer({
   const [showMinimalLoading, setShowMinimalLoading] = useState(false)
   const [retryCount, setRetryCount] = useState(0)
   const [maxRetries] = useState(5)
+  const DEBUG_MODE = false // Set to true only when debugging
+  const [streamHealth, setStreamHealth] = useState<'live' | 'warning' | 'error'>('live')
+  const [lastSegmentTime, setLastSegmentTime] = useState<number>(Date.now())
+  const [segmentLoadFailures, setSegmentLoadFailures] = useState(0)
+  const [actualLatency, setActualLatency] = useState(0)
 
   // Then inside HLSPlayer component, replace useState with:
   const [segmentLoadCount, setSegmentLoadCountState] = useState(
@@ -98,65 +104,56 @@ export function HLSPlayer({
     })
   }
 
-  // Enhanced HLS configuration for 2-second segments with minimal loading interruptions
+  // Ultra-low latency HLS configuration for 1-second segments
   const hlsConfig = {
-    // Optimized for 2-second segments with better buffering
-    maxBufferLength: 8, // 8 seconds buffer for 2-second segments (4 segments)
-    maxBufferSize: 15 * 1024 * 1024, // 15MB buffer for better stability
-    maxBufferHole: 0.5, // Allow 0.5 second holes for 2-second segments
+    // Buffer management - OPTIMIZED FOR LOW LATENCY
+    maxBufferLength: 3,                    // ⚠️ Only 3 seconds buffer (was 8)
+    maxBufferSize: 5 * 1024 * 1024,        // 5MB buffer
+    maxBufferHole: 0.3,                    // Small hole tolerance
 
     // Quality selection
-    startLevel: -1, // Auto-select quality
-    maxMaxBufferLength: 12, // Max 12 seconds buffer for 2-second segments
+    startLevel: -1,                        // Auto-select
+    maxMaxBufferLength: 6,                 // Max 6 seconds
 
-    // Live streaming optimized for 2-second segments
-    liveSyncDurationCount: 2, // Stay 2 segments from live edge (4 seconds)
-    liveMaxLatencyDurationCount: 3, // Allow max 3 segments latency (6 seconds max)
+    // Live streaming - ULTRA LOW LATENCY
+    liveSyncDurationCount: 1,              // ⚠️ Stay only 1 segment behind (was 2)
+    liveMaxLatencyDurationCount: 2,        // ⚠️ Max 2 segments latency (was 3)
     liveDurationInfinity: false,
 
-    // Fragment loading for 2-second segments - more tolerant
-    manifestLoadingTimeOut: 6000, // 6 seconds
+    // Fragment loading - AGGRESSIVE
+    manifestLoadingTimeOut: 3000,          // 3 seconds
     manifestLoadingMaxRetry: 3,
-    manifestLoadingRetryDelay: 1000,
+    manifestLoadingRetryDelay: 500,        // Faster retry
 
-    // Level loading optimizations for 2-second segments
-    levelLoadingTimeOut: 6000,
+    levelLoadingTimeOut: 3000,
     levelLoadingMaxRetry: 3,
-    levelLoadingRetryDelay: 1000,
+    levelLoadingRetryDelay: 500,
 
-    // Fragment loading - optimized for 2-second segments with better tolerance
-    fragLoadingTimeOut: 8000, // 8 seconds timeout for 2-second segments
+    fragLoadingTimeOut: 4000,              // 4 seconds for 1s segments
     fragLoadingMaxRetry: 3,
-    fragLoadingRetryDelay: 1000,
+    fragLoadingRetryDelay: 500,
 
-    // Buffer management for stable 2-second segments
-    lowLatencyMode: false, // Disable for better stability with 2-second segments
-    backBufferLength: 6, // Keep 6 seconds back buffer (3 segments)
+    // Buffer management
+    lowLatencyMode: true,                  // ⚠️ ENABLE (was false)
+    backBufferLength: 3,                   // Keep only 3 seconds back
 
-    // Audio/Video sync for 2-second segments
-    nudgeOffset: 0.1, // Smaller nudge for 2-second segments
+    // Sync
+    nudgeOffset: 0.05,                     // Smaller nudge
     nudgeMaxRetry: 3,
-    maxSeekHole: 0.5,
+    maxSeekHole: 0.3,
 
-    // Playback optimizations for smoother experience
-    progressive: false,
+    // Adaptation - FASTER
+    abrEwmaFastLive: 3.0,
+    abrEwmaSlowLive: 5.0,
+    abrEwmaDefaultEstimate: 1000000,       // 1 Mbps estimate
+    abrBandWidthFactor: 0.95,
+    abrBandWidthUpFactor: 0.98,
 
-    // Adaptation for 2-second segments - more conservative
-    abrEwmaFastLive: 2.0, // Slower adaptation for stability
-    abrEwmaSlowLive: 4.0, // Slow adaptation for 2-second segments
-    abrEwmaFastVoD: 2.0,
-    abrEwmaSlowVoD: 4.0,
-    abrEwmaDefaultEstimate: 500000, // Conservative initial estimate
-    abrBandWidthFactor: 0.95, // Conservative bandwidth usage
-    abrBandWidthUpFactor: 0.98, // Conservative upward switching
-
-    // Buffer settings for stable 2-second segments
-    liveBackBufferLength: 4, // Keep 4 seconds back buffer for 2-second segments
-    enableLowLatency: false, // Disable for maximum stability
+    liveBackBufferLength: 2,               // Minimal back buffer
 
     // Debugging
     debug: false,
-    enableWorker: false,
+    enableWorker: true,                    // Enable worker for performance
     enableSoftwareAES: false
   }
 
@@ -180,6 +177,11 @@ export function HLSPlayer({
     if (retryIntervalRef.current) {
       clearInterval(retryIntervalRef.current)
       retryIntervalRef.current = null
+    }
+    // ADD THIS:
+    if (healthCheckIntervalRef.current) {
+      clearInterval(healthCheckIntervalRef.current)
+      healthCheckIntervalRef.current = null
     }
   }
 
@@ -233,23 +235,44 @@ export function HLSPlayer({
             firstFragLoaded = true
             console.log('First fragment loaded - stream is ready!')
 
-            // NOW we can hide the loading overlay
             setIsLoading(false)
             setBufferStalled(false)
 
-            // Start playback
             if (autoPlay && video.paused) {
               video.play().catch(e => {
                 console.warn('Autoplay blocked:', e.message)
               })
             }
+            console.log(`📺 ${deviceName}: Stream active (${src})`)
           }
 
           setSegmentLoadCount(prev => prev + 1)
+
+          setLastSegmentTime(Date.now())
+          setSegmentLoadFailures(0)
+          setStreamHealth('live')
+
           clearAllTimeouts()
         })
 
         hls.on('hlsError', (event: any, data: any) => {
+
+          const nonFatalErrors = [
+            'bufferStalledError',
+            'bufferSeekOverHole',
+            'bufferNudgeOnStall'
+          ]
+
+          if (nonFatalErrors.includes(data.details) && !data.fatal) {
+            // These are normal - HLS.js handles them automatically
+            return
+          }
+
+          // Only log the first few attempts to reduce console spam
+          if (manifestRetries < 3 || DEBUG_MODE) {
+            console.log('HLS Error:', data.details, 'Fatal:', data.fatal)
+          }
+
           // Only log the first few attempts to reduce console spam
           if (manifestRetries < 3) {
             console.log('HLS Error:', data.details, 'Fatal:', data.fatal)
@@ -315,6 +338,25 @@ export function HLSPlayer({
             }
           }
         })
+
+        healthCheckIntervalRef.current = setInterval(() => {
+          const timeSinceLastSegment = Date.now() - lastSegmentTime
+
+          // If no segments for 10 seconds, mark as error
+          if (timeSinceLastSegment > 10000) {
+            if (streamHealth !== 'error') {
+              console.warn('No segments loaded for 10s - stream may be down')
+              setStreamHealth('error')
+            }
+          }
+          // If no segments for 5 seconds, show warning
+          else if (timeSinceLastSegment > 5000) {
+            if (streamHealth === 'live') {
+              console.warn('Segment loading delayed - showing warning')
+              setStreamHealth('warning')
+            }
+          }
+        }, 2000)
 
         // Load source
         hls.loadSource(src)
@@ -399,7 +441,9 @@ export function HLSPlayer({
     video.setAttribute('webkit-playsinline', 'true')
 
     const handleLoadStart = () => {
-      console.log('Video load started')
+      if (DEBUG_MODE || segmentLoadCount < 1) {
+        console.log('Video load started')
+      }
       setIsLoading(true)
       setError(null)
       setBufferStalled(false)
@@ -418,7 +462,9 @@ export function HLSPlayer({
     }
 
     const handleCanPlay = () => {
-      console.log('Video can play')
+      if (segmentLoadCount < 2 && DEBUG_MODE) {
+        console.log('Video can play')
+      }
       setIsLoading(false)
       setBufferStalled(false)
       setShowMinimalLoading(false)
@@ -428,7 +474,9 @@ export function HLSPlayer({
     }
 
     const handlePlay = () => {
-      console.log('Video playing')
+      if (DEBUG_MODE || segmentLoadCount < 2) {
+        console.log('Video playing')
+      }
       setIsPlaying(true)
       setBufferStalled(false)
       setIsLoading(false)
@@ -438,7 +486,9 @@ export function HLSPlayer({
     }
 
     const handlePause = () => {
-      console.log('Video paused')
+      if (DEBUG_MODE) {
+        console.log('Video paused')
+      }
       setIsPlaying(false)
 
       if (freezeDetectionRef.current) {
@@ -457,20 +507,48 @@ export function HLSPlayer({
         setShowMinimalLoading(false)
       }
 
+      // Calculate buffer distance (not live edge latency)
       if (video.buffered.length > 0) {
         const bufferedEnd = video.buffered.end(video.buffered.length - 1)
-        const timeBehindLive = bufferedEnd - currentVideoTime
+        const bufferDistance = bufferedEnd - currentVideoTime
+
+        // Update displayed latency (this is buffer distance)
+        setActualLatency(bufferDistance)
+
+        // Determine if we're "live" based on buffer health
+        let isCurrentlyLive = true
 
         if (liveLocked) {
-          setIsLive(true)
+          // User locked to live, stay live
+          isCurrentlyLive = true
         } else {
-          const isCurrentlyLive = timeBehindLive < 6
-          setIsLive(isCurrentlyLive)
+          // Consider live if buffer distance is reasonable (<10s)
+          // Note: Normal buffer is 2-5s, >10s means we're falling behind
+          isCurrentlyLive = bufferDistance < 10
 
+          // CRITICAL: Only log ONCE when we first detect falling behind
+          // Use both hasShownSkipToLive AND a threshold check
           if (!isCurrentlyLive && !hasShownSkipToLive) {
             setHasShownSkipToLive(true)
-            console.log('Stream fell behind live, showing Skip to Live option')
+            // Only log in debug mode or first time
+            if (DEBUG_MODE) {
+              console.log(`Stream buffer grew large (${bufferDistance.toFixed(1)}s)`)
+            }
           }
+        }
+
+        setIsLive(isCurrentlyLive)
+
+        // Update stream health based on buffer distance
+        // Warning if buffer is building up (6-10s)
+        // Error is set elsewhere based on segment loading failures
+        if (streamHealth === 'live' && bufferDistance > 8 && bufferDistance < 15) {
+          setStreamHealth('warning')
+        } else if (streamHealth === 'warning' && bufferDistance < 6) {
+          setStreamHealth('live')
+        } else if (bufferDistance >= 15) {
+          // Very large buffer suggests a problem
+          setStreamHealth('warning')
         }
       }
     }
@@ -488,7 +566,9 @@ export function HLSPlayer({
     }
 
     const handleWaiting = () => {
-      console.log('Video waiting/buffering - checking if genuine stall...')
+      if (DEBUG_MODE) {
+        console.log('Video waiting/buffering - checking if genuine stall...')
+      }
 
       if (bufferTimeoutRef.current) {
         clearTimeout(bufferTimeoutRef.current)
@@ -496,17 +576,19 @@ export function HLSPlayer({
 
       bufferTimeoutRef.current = setTimeout(() => {
         if (video.readyState < 3 && video.currentTime < 1 && !isPlaying) {
-          console.log('Genuine buffer stall confirmed')
+          if (DEBUG_MODE) {
+            console.log('Genuine buffer stall confirmed')
+          }
           setIsLoading(true)
           setBufferStalled(true)
-        } else {
-          console.log('False alarm - segment transition completed')
         }
       }, 4000)
     }
 
     const handlePlaying = () => {
-      console.log('Video playing smoothly')
+      if (segmentLoadCount < 1 && DEBUG_MODE) {
+        console.log('Video playing smoothly')
+      }
       setIsLoading(false)
       setBufferStalled(false)
       setShowMinimalLoading(false)
@@ -578,6 +660,8 @@ export function HLSPlayer({
     setLastPlayTime(0)
     setShowMinimalLoading(false)
     setRetryCount(0)
+    setStreamHealth('live')
+    setLastSegmentTime(Date.now())
 
     const initTimer = setTimeout(() => {
       initializeHLS()
@@ -748,21 +832,37 @@ export function HLSPlayer({
         <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black to-transparent p-4">
           <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
             <div className="flex items-center space-x-2 flex-wrap">
-              <Badge variant={isLive ? "default" : "secondary"} className="text-xs">
-                {isLive ? (
+              {/* Smart tri-state badge based on streamHealth */}
+              <Badge
+                variant="default"
+                className={`text-xs ${streamHealth === 'error' ? 'bg-red-600 text-white' :
+                  streamHealth === 'warning' ? 'bg-yellow-500 text-black' :
+                    'bg-green-600 text-white'
+                  }`}
+              >
+                {streamHealth === 'error' ? (
                   <>
-                    <div className="w-2 h-2 bg-red-500 rounded-full mr-1 animate-pulse"></div>
-                    LIVE
+                    <WifiOff className="w-3 h-3 mr-1" />
+                    ERROR
+                  </>
+                ) : streamHealth === 'warning' ? (
+                  <>
+                    <Clock className="w-3 h-3 mr-1" />
+                    WARNING
                   </>
                 ) : (
-                  'RECORDED'
+                  <>
+                    <div className="w-2 h-2 bg-white rounded-full mr-1 animate-pulse"></div>
+                    LIVE
+                  </>
                 )}
               </Badge>
 
-              {latency > 0 && (
+              {/* Only show buffer distance if >2s and not error */}
+              {actualLatency > 2 && streamHealth !== 'error' && (
                 <Badge variant="outline" className="text-xs text-white border-white">
                   <Clock className="w-3 h-3 mr-1" />
-                  {latency.toFixed(1)}s delay
+                  {actualLatency.toFixed(1)}s buffer
                 </Badge>
               )}
 
@@ -772,12 +872,19 @@ export function HLSPlayer({
                 </Badge>
               )}
 
+              {DEBUG_MODE && (
+                <div className="text-xs text-gray-400">
+                  Segments: {segmentLoadCount}
+                </div>
+              )}
+
               <div className="text-xs text-white opacity-75">
                 {deviceName}
               </div>
             </div>
 
-            {!liveLocked && hasShownSkipToLive && !isLive && (
+            {/* Show Skip to Live button when buffer is large */}
+            {!liveLocked && !isLive && streamHealth !== 'error' && actualLatency > 10 && (
               <Button
                 size="sm"
                 onClick={jumpToLive}
@@ -841,8 +948,10 @@ export function HLSPlayer({
               )}
 
               <div className="flex items-center space-x-1">
-                {error ? (
+                {streamHealth === 'error' ? (
                   <WifiOff className="w-4 h-4 text-red-400" />
+                ) : streamHealth === 'warning' ? (
+                  <Wifi className="w-4 h-4 text-yellow-400" />
                 ) : (
                   <Wifi className="w-4 h-4 text-green-400" />
                 )}

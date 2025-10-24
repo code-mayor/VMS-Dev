@@ -700,4 +700,31 @@ router.post('/test-ffmpeg', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/streams/status - Get concise stream status summary
+ */
+router.get('/status', async (req, res) => {
+  try {
+    const hlsService = require('../services/hls-streaming-service').HLSStreamingService;
+    const service = new hlsService();
+    const streams = service.getActiveStreams();
+
+    const summary = {
+      total: streams.length,
+      active: streams.filter(s => s.status === 'active').length,
+      errors: streams.filter(s => s.status === 'error').length,
+      streams: streams.map(s => ({
+        device: s.deviceName,
+        deviceId: s.deviceId,
+        status: s.status,
+        uptime: s.startTime ? Math.floor((Date.now() - new Date(s.startTime).getTime()) / 1000) : 0
+      }))
+    };
+
+    res.json({ success: true, summary });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 module.exports = router;
